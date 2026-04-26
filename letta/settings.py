@@ -213,10 +213,31 @@ class ModelSettings(BaseSettings):
 
     # google ai
     gemini_api_key: Optional[str] = None
+    gemini_api_keys: Optional[str] = Field(
+        default=None,
+        description="Comma-separated list of Gemini API keys for automatic rotation on 429 errors. "
+        "Combined with gemini_api_key; duplicates are ignored.",
+    )
     gemini_base_url: str = "https://generativelanguage.googleapis.com/"
     gemini_force_minimum_thinking_budget: bool = False
     gemini_max_retries: int = 5
     gemini_timeout_seconds: float = 600.0
+
+    @property
+    def all_gemini_api_keys(self) -> list[str]:
+        """All configured Gemini API keys, deduplicated (primary key first)."""
+        seen: set[str] = set()
+        keys: list[str] = []
+        candidates = []
+        if self.gemini_api_key:
+            candidates.append(self.gemini_api_key)
+        if self.gemini_api_keys:
+            candidates.extend(k.strip() for k in self.gemini_api_keys.split(",") if k.strip())
+        for k in candidates:
+            if k not in seen:
+                seen.add(k)
+                keys.append(k)
+        return keys
 
     # google vertex
     google_cloud_project: Optional[str] = None

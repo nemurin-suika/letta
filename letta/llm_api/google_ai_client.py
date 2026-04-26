@@ -1,10 +1,11 @@
+import threading
 from typing import List, Optional, Tuple
 
 import httpx
 from google import genai
 from google.genai.types import HttpOptions
 
-from letta.errors import ErrorCode, LLMAuthenticationError, LLMError
+from letta.errors import ErrorCode, LLMAuthenticationError, LLMError, LLMRateLimitError
 from letta.llm_api.google_constants import GOOGLE_MODEL_FOR_API_KEY_CHECK
 from letta.llm_api.google_vertex_client import GoogleVertexClient
 from letta.log import get_logger
@@ -12,6 +13,24 @@ from letta.schemas.llm_config import LLMConfig
 from letta.settings import model_settings
 
 logger = get_logger(__name__)
+
+
+class _KeyRotator:
+    """Thread-safe round-robin index for Gemini API key selection."""
+
+    def __init__(self) -> None:
+        self._index = 0
+        self._lock = threading.Lock()
+
+    def next_start(self, num_keys: int) -> int:
+        """Return the next starting index and advance the counter."""
+        with self._lock:
+            idx = self._index
+            self._index = (self._index + 1) % num_keys
+            return idx
+
+
+_key_rotator = _KeyRotator()
 
 
 class GoogleAIClient(GoogleVertexClient):
@@ -29,10 +48,10 @@ class GoogleAIClient(GoogleVertexClient):
             http_options=HttpOptions(timeout=timeout_ms),
         )
 
-    async def _get_client_async(self, llm_config: Optional[LLMConfig] = None):
+    async def _get_client_async(self, llm_config: Optional[LLMConfig] = None, api_key_override: Optional[str] = None):
         timeout_ms = int(model_settings.gemini_timeout_seconds * 1000)
-        api_key = None
-        if llm_config:
+        api_key = api_key_override
+        if not api_key and llm_config:
             api_key, _, _ = await self.get_byok_overrides_async(llm_config)
         if not api_key:
             api_key = model_settings.gemini_api_key
@@ -40,6 +59,146 @@ class GoogleAIClient(GoogleVertexClient):
             api_key=api_key,
             http_options=HttpOptions(timeout=timeout_ms),
         )
+
+    async def request_async(self, request_data: dict, llm_config: LLMConfig) -> dict:
+        """Wraps GoogleVertexClient.request_async with automatic key rotation on 429."""
+        keys = model_settings.all_gemini_api_keys
+        if len(keys) <= 1:
+            # Single-key path: delegate to parent (preserves all existing retry logic)
+            return await super().request_async(request_data, llm_config)
+
+        start = _key_rotator.next_start(len(keys))
+        last_error: Optional[LLMRateLimitError] = None
+        for attempt in range(len(keys)):
+            key = keys[(start + attempt) % len(keys)]
+            try:
+                return await self._request_async_with_key(request_data, llm_config, key)
+            except LLMRateLimitError as e:
+                last_error = e
+                logger.warning(
+                    f"[GoogleAI] Key #{(start + attempt) % len(keys) + 1} rate limited (429), "
+                    f"rotating to next key ({attempt + 1}/{len(keys)} tried)"
+                )
+        assert last_error is not None
+        raise last_error
+
+    async def _request_async_with_key(self, request_data: dict, llm_config: LLMConfig, api_key: str) -> dict:
+        """Runs the parent request_async logic using the given API key.
+
+        Temporarily patches _get_client_async so the parent's retry loop uses the
+        specified key without needing to touch the parent implementation.
+        """
+        from google.genai import errors
+        from letta.helpers.json_helpers import sanitize_unicode_surrogates
+        import pydantic_core
+
+        request_data = sanitize_unicode_surrogates(request_data)
+        client = await self._get_client_async(llm_config, api_key_override=api_key)
+
+        retry_count = 1
+        should_retry = True
+        response_data = None
+        while should_retry and retry_count <= self.MAX_RETRIES:
+            try:
+                response = await client.aio.models.generate_content(
+                    model=llm_config.model,
+                    contents=request_data["contents"],
+                    config=request_data["config"],
+                )
+            except pydantic_core._pydantic_core.ValidationError as e:
+                from letta.errors import LLMBadRequestError
+                raise LLMBadRequestError(
+                    message=f"Invalid tool schema for {self._provider_name()}: {str(e)}",
+                    code=ErrorCode.INTERNAL_SERVER_ERROR,
+                )
+            except errors.APIError as e:
+                if e.code == 503 or e.code == 500 or e.code == 504:
+                    logger.warning(f"Received {e}, retrying {retry_count}/{self.MAX_RETRIES}")
+                    retry_count += 1
+                    if retry_count > self.MAX_RETRIES:
+                        raise self.handle_llm_error(e, llm_config=llm_config)
+                    continue
+                raise self.handle_llm_error(e, llm_config=llm_config)
+            except Exception as e:
+                raise self.handle_llm_error(e, llm_config=llm_config)
+
+            response_data = response.model_dump()
+            is_malformed = self.is_malformed_function_call(response_data)
+            if is_malformed:
+                logger.warning(
+                    f"Received MALFORMED_FUNCTION_CALL for {llm_config.model}, "
+                    f"retrying {retry_count}/{self.MAX_RETRIES}"
+                )
+            should_retry = is_malformed
+            retry_count += 1
+
+        if response_data is None:
+            raise RuntimeError("Failed to get response data after all retries")
+        return response_data
+
+    async def stream_async(self, request_data: dict, llm_config: LLMConfig):
+        """Wraps GoogleVertexClient.stream_async with automatic key rotation on 429."""
+        keys = model_settings.all_gemini_api_keys
+        if len(keys) <= 1:
+            async for chunk in super().stream_async(request_data, llm_config):
+                yield chunk
+            return
+
+        start = _key_rotator.next_start(len(keys))
+        last_error: Optional[LLMRateLimitError] = None
+        for attempt in range(len(keys)):
+            key = keys[(start + attempt) % len(keys)]
+            try:
+                async for chunk in self._stream_async_with_key(request_data, llm_config, key):
+                    yield chunk
+                return  # stream completed successfully
+            except LLMRateLimitError as e:
+                last_error = e
+                logger.warning(
+                    f"[GoogleAI] Key #{(start + attempt) % len(keys) + 1} rate limited (429) during stream, "
+                    f"rotating to next key ({attempt + 1}/{len(keys)} tried)"
+                )
+        assert last_error is not None
+        raise last_error
+
+    async def _stream_async_with_key(self, request_data: dict, llm_config: LLMConfig, api_key: str):
+        """Runs stream_async logic using the given API key."""
+        import json
+        from google.genai import errors
+        from letta.helpers.json_helpers import sanitize_unicode_surrogates
+        import pydantic_core
+
+        request_data = sanitize_unicode_surrogates(request_data)
+        client = await self._get_client_async(llm_config, api_key_override=api_key)
+
+        try:
+            response = await client.aio.models.generate_content_stream(
+                model=llm_config.model,
+                contents=request_data["contents"],
+                config=request_data["config"],
+            )
+        except pydantic_core._pydantic_core.ValidationError as e:
+            from letta.errors import LLMBadRequestError
+            raise LLMBadRequestError(
+                message=f"Invalid tool schema for {self._provider_name()}: {str(e)}",
+                code=ErrorCode.INTERNAL_SERVER_ERROR,
+            )
+        except errors.APIError as e:
+            raise self.handle_llm_error(e, llm_config=llm_config)
+        except Exception as e:
+            logger.error(f"Error streaming {self._provider_name()} request: {e} with request data: {json.dumps(request_data)}")
+            raise e
+
+        try:
+            async for chunk in response:
+                yield chunk
+        except errors.ClientError as e:
+            if e.code == 499:
+                logger.info(f"{self._provider_prefix()} Stream cancelled by client (499): {e}")
+                return
+            raise self.handle_llm_error(e, llm_config=llm_config)
+        except errors.APIError as e:
+            raise self.handle_llm_error(e, llm_config=llm_config)
 
 
 def get_gemini_endpoint_and_headers(

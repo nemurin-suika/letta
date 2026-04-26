@@ -1,5 +1,6 @@
 # Start with pgvector base for builder
 FROM pgvector/pgvector:0.8.1-pg15 AS builder
+ENV DEBIAN_FRONTEND=noninteractive
 # comment to trigger ci
 # Install Python and required packages
 RUN apt-get update && apt-get install -y \
@@ -9,7 +10,10 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     libpq-dev \
     python3-dev \
+    tzdata \
     && rm -rf /var/lib/apt/lists/*
+
+RUN ln -snf /usr/share/zoneinfo/Asia/Seoul /etc/localtime && echo Asia/Seoul > /etc/timezone
 
 ARG LETTA_ENVIRONMENT=DEV
 ENV LETTA_ENVIRONMENT=${LETTA_ENVIRONMENT} \
