@@ -992,7 +992,41 @@ class AgentManager:
             agent_encrypted = await agent.to_pydantic_async(decrypt=False)
 
         # Decrypt secrets outside session
-        return (await decrypt_agent_secrets([agent_encrypted]))[0]
+        agent_state = (await decrypt_agent_secrets([agent_encrypted]))[0]
+
+        # Rebuild the in-context system message (message_ids[0]) when any field that affects
+        # its compiled content changes. The stored message is what the agent actually reads at
+        # runtime; without a rebuild the old content persists until the next compaction.
+        #
+        # Triggers:
+        #   - system: the prompt template text changed — always requires a force rebuild because
+        #     the old template is still a substring of the old message (memory content is the same).
+        #   - llm_config: model_endpoint_type (e.g. OpenAI→Anthropic) changes the memory-block
+        #     rendering format (line-numbered vs. plain) for sleeptime/memgpt/letta_v1 agents.
+        #   - tool_rules: tool-usage-rules section in the compiled memory string changes.
+        #   - max_files_open: affects how source/file directories are rendered in the memory string.
+        needs_rebuild = any(
+            [
+                agent_update.system is not None,
+                agent_update.llm_config is not None,
+                agent_update.tool_rules is not None,
+                agent_update.max_files_open is not None,
+            ]
+        )
+        if needs_rebuild:
+            # Rebuild the agent-level system message (message_ids[0] — used by the default
+            # conversation path). rebuild_system_prompt_async also loads a fresh agent_state
+            # with all relationships, which we reuse for the conversation rebuild below.
+            agent_state, _, _, _ = await self.rebuild_system_prompt_async(
+                agent_id=agent_id, actor=actor, force=True, update_timestamp=False
+            )
+            # Named conversations each have their own system message (separate from
+            # message_ids[0]). Rebuild those in-place too so they stay in sync.
+            await self._rebuild_conversation_system_messages_async(
+                agent_id=agent_id, agent_state=agent_state, actor=actor
+            )
+
+        return agent_state
 
     @enforce_types
     @trace_method
@@ -1610,6 +1644,81 @@ class AgentManager:
                 curr_system_message = temp_message
 
         return agent_state, curr_system_message, num_messages, num_archival_memories
+
+    @trace_method
+    async def _rebuild_conversation_system_messages_async(
+        self,
+        agent_id: str,
+        agent_state: PydanticAgentState,
+        actor: PydanticUser,
+    ) -> None:
+        """Rebuild the system message for every named conversation owned by this agent.
+
+        Named conversations (conversation_id IS NOT NULL) each have their own system
+        message stored as the position-0 entry in conversation_messages. These are
+        separate from agent_state.message_ids[0], so rebuild_system_prompt_async does
+        not touch them. This method updates each one in-place to reflect the new
+        agent.system template (and any other compiled-memory-affecting changes).
+        """
+        from letta.orm.conversation_messages import ConversationMessage as ConvMsgModel
+
+        # Batch-fetch all (conversation_id, message_id) pairs for position-0 messages
+        # across all named conversations for this agent.
+        async with db_registry.async_session() as session:
+            result = await session.execute(
+                select(ConvMsgModel.conversation_id, ConvMsgModel.message_id).where(
+                    ConvMsgModel.agent_id == agent_id,
+                    ConvMsgModel.conversation_id.isnot(None),
+                    ConvMsgModel.position == 0,
+                    ConvMsgModel.in_context == True,
+                )
+            )
+            conv_sys_pairs: list[tuple[str, str]] = result.all()
+
+        if not conv_sys_pairs:
+            return
+
+        all_sys_msg_ids = [msg_id for _, msg_id in conv_sys_pairs]
+        system_messages = await self.message_manager.get_messages_by_ids_async(
+            message_ids=all_sys_msg_ids, actor=actor
+        )
+        msg_by_id = {m.id: m for m in system_messages}
+
+        # Compile the shared parts of the system prompt once.
+        tool_rules_solver = ToolRulesSolver(agent_state.tool_rules)
+        curr_memory_str = agent_state.memory.compile(
+            sources=agent_state.sources,
+            tool_usage_rules=tool_rules_solver.compile_tool_rule_prompts(),
+            max_files_open=agent_state.max_files_open,
+            llm_config=agent_state.llm_config,
+        )
+        num_messages = await self.message_manager.size_async(actor=actor, agent_id=agent_id)
+        num_archival = await self.passage_manager.agent_passage_size_async(actor=actor, agent_id=agent_id)
+
+        # Update each conversation's system message in-place (only if content changed).
+        for conversation_id, message_id in conv_sys_pairs:
+            sys_msg = msg_by_id.get(message_id)
+            if sys_msg is None:
+                continue
+
+            new_content = PromptGenerator.get_system_message_from_compiled_memory(
+                system_prompt=agent_state.system,
+                memory_with_sources=curr_memory_str,
+                agent_id=agent_id,
+                conversation_id=conversation_id,
+                in_context_memory_last_edit=sys_msg.created_at,
+                timezone=agent_state.timezone,
+                previous_message_count=num_messages,
+                archival_memory_size=num_archival,
+            )
+
+            curr_content = sys_msg.content[0].text if sys_msg.content else ""
+            if new_content != curr_content:
+                await self.message_manager.update_message_by_id_async(
+                    message_id=message_id,
+                    message_update=MessageUpdate(content=new_content),
+                    actor=actor,
+                )
 
     @enforce_types
     @trace_method
