@@ -989,7 +989,7 @@ class MCPServerManager:
             ValueError: If server config type is not supported
         """
         if hasattr(server_config, "server_url") and server_config.server_url:
-            validate_mcp_server_url(server_config.server_url)
+            validate_mcp_server_url(server_config.server_url, resolve_hostname=False)
 
         # If no OAuth provider is provided, check if we have stored OAuth credentials
         if oauth is None and hasattr(server_config, "server_url"):
