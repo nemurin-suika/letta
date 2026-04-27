@@ -268,9 +268,12 @@ class LettaAgentV3(LettaAgentV2):
             )
 
         request_span = self._request_checkpoint_start(request_start_timestamp_ns=request_start_timestamp_ns)
+        _step_total_start_ns = get_utc_timestamp_ns()
+        self.logger.info(f"[TIMING] step() 시작: agent_id={self.agent_state.id}, run_id={run_id}")
         response_letta_messages = []
 
         # Prepare in-context messages (conversation mode if conversation_id provided)
+        _msg_prep_start_ns = get_utc_timestamp_ns()
         curr_in_context_messages, input_messages_to_persist = await _prepare_in_context_messages_no_persist_async(
             input_messages,
             self.agent_state,
@@ -279,6 +282,8 @@ class LettaAgentV3(LettaAgentV2):
             run_id,
             conversation_id=conversation_id,
         )
+        _msg_prep_ms = (get_utc_timestamp_ns() - _msg_prep_start_ns) / 1_000_000
+        self.logger.info(f"[TIMING] 메시지 준비 완료: {_msg_prep_ms:.1f}ms")
         follow_up_messages = []
         if len(input_messages_to_persist) > 1 and input_messages_to_persist[0].role == "approval":
             follow_up_messages = input_messages_to_persist[1:]
@@ -338,6 +343,8 @@ class LettaAgentV3(LettaAgentV2):
                     break
                 credit_task = None
 
+            _loop_step_start_ns = get_utc_timestamp_ns()
+            self.logger.info(f"[TIMING] 에이전트 루프 스텝 {i + 1} 시작")
             response = self._step(
                 # we append input_messages_to_persist since they aren't checkpointed as in-context until the end of the step (may be rolled back)
                 messages=list(self.in_context_messages + input_messages_to_persist),
@@ -354,6 +361,9 @@ class LettaAgentV3(LettaAgentV2):
 
             async for chunk in response:
                 response_letta_messages.append(chunk)
+
+            _loop_step_ms = (get_utc_timestamp_ns() - _loop_step_start_ns) / 1_000_000
+            self.logger.info(f"[TIMING] 에이전트 루프 스텝 {i + 1} 완료: {_loop_step_ms:.1f}ms")
 
             # Check if step was cancelled - break out of the step loop
             if not self.should_continue and self.stop_reason.stop_reason == StopReasonType.cancelled.value:
@@ -435,6 +445,9 @@ class LettaAgentV3(LettaAgentV2):
                 self.job_update_metadata = {}
             self.job_update_metadata["result"] = result.model_dump(mode="json")
 
+        _total_ms = (get_utc_timestamp_ns() - _step_total_start_ns) / 1_000_000
+        self.logger.info(f"[TIMING] step() 전체 완료: {_total_ms:.1f}ms (stop_reason={self.stop_reason.stop_reason if self.stop_reason else None})")
+
         await self._request_checkpoint_finish(
             request_span=request_span, request_start_timestamp_ns=request_start_timestamp_ns, run_id=run_id
         )
@@ -488,6 +501,8 @@ class LettaAgentV3(LettaAgentV2):
         self.client_skills = client_skills or []
         self.override_system = override_system
         request_span = self._request_checkpoint_start(request_start_timestamp_ns=request_start_timestamp_ns)
+        _stream_total_start_ns = get_utc_timestamp_ns()
+        self.logger.info(f"[TIMING] stream() 시작: agent_id={self.agent_state.id}, run_id={run_id}")
         response_letta_messages = []
         first_chunk = True
 
@@ -551,6 +566,7 @@ class LettaAgentV3(LettaAgentV2):
 
         try:
             # Prepare in-context messages (conversation mode if conversation_id provided)
+            _msg_prep_start_ns = get_utc_timestamp_ns()
             in_context_messages, input_messages_to_persist = await _prepare_in_context_messages_no_persist_async(
                 input_messages,
                 self.agent_state,
@@ -559,6 +575,8 @@ class LettaAgentV3(LettaAgentV2):
                 run_id,
                 conversation_id=conversation_id,
             )
+            _msg_prep_ms = (get_utc_timestamp_ns() - _msg_prep_start_ns) / 1_000_000
+            self.logger.info(f"[TIMING] 메시지 준비 완료: {_msg_prep_ms:.1f}ms")
             follow_up_messages = []
             if len(input_messages_to_persist) > 1 and input_messages_to_persist[0].role == "approval":
                 follow_up_messages = input_messages_to_persist[1:]
@@ -579,6 +597,8 @@ class LettaAgentV3(LettaAgentV2):
                         break
                     credit_task = None
 
+                _loop_step_start_ns = get_utc_timestamp_ns()
+                self.logger.info(f"[TIMING] 에이전트 루프 스텝 {i + 1} 시작")
                 response = self._step(
                     # we append input_messages_to_persist since they aren't checkpointed as in-context until the end of the step (may be rolled back)
                     messages=list(self.in_context_messages + input_messages_to_persist),
@@ -611,6 +631,9 @@ class LettaAgentV3(LettaAgentV2):
 
                     yield f"data: {chunk.model_dump_json()}\n\n"
                     first_chunk = False
+
+                _loop_step_ms = (get_utc_timestamp_ns() - _loop_step_start_ns) / 1_000_000
+                self.logger.info(f"[TIMING] 에이전트 루프 스텝 {i + 1} 완료: {_loop_step_ms:.1f}ms")
 
                 # Check if step was cancelled - break out of the step loop
                 if not self.should_continue and self.stop_reason.stop_reason == StopReasonType.cancelled.value:
@@ -709,6 +732,9 @@ class LettaAgentV3(LettaAgentV2):
                 if self.job_update_metadata is None:
                     self.job_update_metadata = {}
                 self.job_update_metadata["result"] = result.model_dump(mode="json")
+
+            _stream_total_ms = (get_utc_timestamp_ns() - _stream_total_start_ns) / 1_000_000
+            self.logger.info(f"[TIMING] stream() 전체 완료: {_stream_total_ms:.1f}ms (stop_reason={self.stop_reason.stop_reason if self.stop_reason else None})")
 
             await self._request_checkpoint_finish(
                 request_span=request_span, request_start_timestamp_ns=request_start_timestamp_ns, run_id=run_id
@@ -952,7 +978,9 @@ class LettaAgentV3(LettaAgentV2):
         )
         try:
             self.last_function_response = _load_last_function_response(messages)
+            _tools_start_ns = get_utc_timestamp_ns()
             valid_tools = await self._get_valid_tools()
+            self.logger.info(f"[TIMING] 유효 툴 로드 완료: {(get_utc_timestamp_ns() - _tools_start_ns) / 1_000_000:.1f}ms ({len(valid_tools)}개)")
             require_tool_call = self.tool_rules_solver.should_force_tool_call()
 
             if self._require_tool_call != require_tool_call:
@@ -965,8 +993,10 @@ class LettaAgentV3(LettaAgentV2):
             # Refresh messages at the start of each step to scrub inner thoughts.
             # NOTE: We skip system prompt refresh during normal steps to preserve prefix caching.
             # The system prompt is only rebuilt after compaction or message reset.
+            _refresh_start_ns = get_utc_timestamp_ns()
             try:
                 messages = await self._refresh_messages(messages)
+                self.logger.info(f"[TIMING] 메시지 리프레시 완료: {(get_utc_timestamp_ns() - _refresh_start_ns) / 1_000_000:.1f}ms ({len(messages)}개)")
             except Exception as e:
                 self.logger.warning(f"Failed to refresh messages at step start: {e}")
 
@@ -1092,6 +1122,7 @@ class LettaAgentV3(LettaAgentV2):
                 force_tool_call = valid_tools[0]["name"] if len(valid_tools) == 1 and self._require_tool_call else None
                 for llm_request_attempt in range(summarizer_settings.max_summarizer_retries + 1):
                     try:
+                        _build_req_start_ns = get_utc_timestamp_ns()
                         request_system_prompt = self.generate_request_system_prompt(
                             client_skills=self.client_skills,
                             current_system_message=messages[0],
@@ -1106,6 +1137,7 @@ class LettaAgentV3(LettaAgentV2):
                             tool_return_truncation_chars=self._compute_tool_return_truncation_chars(),
                             system=request_system_prompt,
                         )
+                        self.logger.info(f"[TIMING] LLM 요청 데이터 빌드 완료: {(get_utc_timestamp_ns() - _build_req_start_ns) / 1_000_000:.1f}ms (messages={len(messages)}개)")
                         # TODO: Extend to more providers, and also approval tool rules
                         # TODO: this entire code block should be inside of the clients
                         # Enable parallel tool use when no tool rules are attached
@@ -1151,6 +1183,10 @@ class LettaAgentV3(LettaAgentV2):
                             yield request_data
                             return
 
+                        _llm_invoke_start_ns = get_utc_timestamp_ns()
+                        self.logger.info(
+                            f"[TIMING] LLM 호출 시작: model={active_llm_config.model}, provider={active_llm_config.model_endpoint_type}, tools={len(valid_tools)}개"
+                        )
                         step_progression, step_metrics = self._step_checkpoint_llm_request_start(step_metrics, agent_step_span)
                         invocation = llm_adapter.invoke_llm(
                             request_data=request_data,
@@ -1300,6 +1336,11 @@ class LettaAgentV3(LettaAgentV2):
 
                 step_progression, step_metrics = self._step_checkpoint_llm_request_finish(
                     step_metrics, agent_step_span, llm_adapter.llm_request_finish_timestamp_ns
+                )
+                _llm_invoke_ms = (get_utc_timestamp_ns() - _llm_invoke_start_ns) / 1_000_000
+                self.logger.info(
+                    f"[TIMING] LLM 호출 완료: {_llm_invoke_ms:.1f}ms"
+                    f" (prompt={llm_adapter.usage.prompt_tokens}t, completion={llm_adapter.usage.completion_tokens}t)"
                 )
                 # update metrics
                 self._update_global_usage_stats(llm_adapter.usage)
@@ -1826,6 +1867,7 @@ class LettaAgentV3(LettaAgentV2):
                 result = _build_rule_violation_result(spec["name"], valid_tool_names, tool_rules_solver)
                 return result, 0
             t0 = get_utc_timestamp_ns()
+            self.logger.info(f"[TIMING] 툴 실행 시작: tool={spec['name']}")
             target_tool = next((x for x in self.agent_state.tools if x.name == spec["name"]), None)
             res = await self._execute_tool(
                 target_tool=target_tool,
@@ -1835,6 +1877,7 @@ class LettaAgentV3(LettaAgentV2):
                 step_id=step_id,
             )
             dt = get_utc_timestamp_ns() - t0
+            self.logger.info(f"[TIMING] 툴 실행 완료: tool={spec['name']}, {dt / 1_000_000:.1f}ms, success={res.success_flag}")
             return res, dt
 
         if len(exec_specs) == 1:

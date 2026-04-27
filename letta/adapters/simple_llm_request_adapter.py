@@ -1,3 +1,4 @@
+import logging
 from typing import AsyncGenerator
 
 from letta.adapters.letta_llm_request_adapter import LettaLLMRequestAdapter
@@ -7,6 +8,8 @@ from letta.schemas.enums import LLMCallType
 from letta.schemas.letta_message import LettaMessage
 from letta.schemas.letta_message_content import OmittedReasoningContent, ReasoningContent, TextContent
 from letta.schemas.usage import normalize_cache_tokens, normalize_reasoning_tokens
+
+logger = logging.getLogger(__name__)
 
 
 class SimpleLLMRequestAdapter(LettaLLMRequestAdapter):
@@ -53,14 +56,22 @@ class SimpleLLMRequestAdapter(LettaLLMRequestAdapter):
             llm_config=self.llm_config.model_dump() if self.llm_config else None,
             billing_context=self.billing_context,
         )
+        _model_name = self.llm_config.model if self.llm_config else "unknown"
+        _provider = self.llm_config.model_endpoint_type if self.llm_config else "unknown"
+        _llm_call_start_ns = get_utc_timestamp_ns()
+        logger.info(f"[TIMING] LLM API 호출 시작: provider={_provider}, model={_model_name}")
         try:
             self.response_data = await self.llm_client.request_async_with_telemetry(request_data, self.llm_config)
         except Exception as e:
+            _llm_call_duration_ms = (get_utc_timestamp_ns() - _llm_call_start_ns) / 1_000_000
+            logger.info(f"[TIMING] LLM API 호출 실패: {_llm_call_duration_ms:.1f}ms (provider={_provider}, model={_model_name})")
             if isinstance(e, LLMError):
                 raise
             raise self.llm_client.handle_llm_error(e, llm_config=self.llm_config)
 
         self.llm_request_finish_timestamp_ns = get_utc_timestamp_ns()
+        _llm_call_duration_ms = (self.llm_request_finish_timestamp_ns - _llm_call_start_ns) / 1_000_000
+        logger.info(f"[TIMING] LLM API 호출 완료: {_llm_call_duration_ms:.1f}ms (provider={_provider}, model={_model_name})")
 
         # Convert response to chat completion format
         self.chat_completions_response = await self.llm_client.convert_response_to_chat_completion(

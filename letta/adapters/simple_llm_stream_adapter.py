@@ -139,6 +139,9 @@ class SimpleLLMStreamAdapter(LettaLLMStreamAdapter):
             raise ValueError(f"Streaming not supported for provider {self.llm_config.model_endpoint_type}")
 
         # Start the streaming request (map provider errors to common LLMError types)
+        _model_name = self.llm_config.model if self.llm_config else "unknown"
+        _provider = self.llm_config.model_endpoint_type if self.llm_config else "unknown"
+        logger.info(f"[TIMING] LLM 스트리밍 API 호출 시작: provider={_provider}, model={_model_name}")
         try:
             # Gemini uses async generator pattern (no await) to maintain connection lifecycle
             # Other providers return awaitables that resolve to iterators
@@ -170,11 +173,16 @@ class SimpleLLMStreamAdapter(LettaLLMStreamAdapter):
             raise self.llm_client.handle_llm_error(e, llm_config=self.llm_config)
 
         stream_started = True
+        _first_token_logged = False
 
         try:
             # Process the stream and yield chunks immediately for TTFT
             try:
                 async for chunk in self.interface.process(stream):  # TODO: add ttft span
+                    if not _first_token_logged:
+                        _ttft_ms = (get_utc_timestamp_ns() - request_start_ns) / 1_000_000
+                        logger.info(f"[TIMING] 첫 번째 토큰 수신(TTFT): {_ttft_ms:.1f}ms (provider={_provider}, model={_model_name})")
+                        _first_token_logged = True
                     # Yield each chunk immediately as it arrives
                     yield chunk
             except BaseException as e:
@@ -196,6 +204,8 @@ class SimpleLLMStreamAdapter(LettaLLMStreamAdapter):
             else:
                 # After streaming completes, extract the accumulated data
                 self.llm_request_finish_timestamp_ns = get_utc_timestamp_ns()
+                _stream_duration_ms = (self.llm_request_finish_timestamp_ns - request_start_ns) / 1_000_000
+                logger.info(f"[TIMING] LLM 스트리밍 완료: {_stream_duration_ms:.1f}ms (provider={_provider}, model={_model_name})")
         finally:
             if not stream_started:
                 return

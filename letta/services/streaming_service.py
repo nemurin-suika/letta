@@ -219,17 +219,21 @@ class StreamingService:
             Tuple of (run object or None, streaming response)
         """
         request_start_timestamp_ns = get_utc_timestamp_ns()
+        logger.info(f"[TIMING] 요청 수신: agent_id={agent_id}")
         MetricRegistry().user_message_counter.add(1, get_ctx_attributes())
 
         # get redis client
         redis_client = await get_redis_client()
 
         # load agent and check eligibility
+        _agent_load_start_ns = get_utc_timestamp_ns()
         agent = await self.server.agent_manager.get_agent_by_id_async(
             agent_id,
             actor,
             include_relationships=["memory", "multi_agent_group", "sources", "tool_exec_environment_variables", "tools", "tags"],
         )
+        _agent_load_ms = (get_utc_timestamp_ns() - _agent_load_start_ns) / 1_000_000
+        logger.info(f"[TIMING] 에이전트 상태 로드 완료: {_agent_load_ms:.1f}ms (agent_id={agent_id})")
 
         # Apply conversation-level model override if set (lower priority than request override)
         if conversation_id and not request.override_model:
@@ -332,6 +336,7 @@ class StreamingService:
         run_update_metadata = None
 
         try:
+            _run_create_start_ns = get_utc_timestamp_ns()
             if settings.track_agent_run:
                 run = await self._create_run(agent_id, request, run_type, actor, conversation_id=conversation_id)
                 await redis_client.set(f"{REDIS_RUN_ID_PREFIX}:{agent_id}", run.id if run else None)
@@ -346,8 +351,14 @@ class StreamingService:
                 for otid in message_otids:
                     await redis_client.set_otid_run_mapping(otid, run.id)
 
+            _run_create_ms = (get_utc_timestamp_ns() - _run_create_start_ns) / 1_000_000
+            logger.info(f"[TIMING] 런 생성 완료: {_run_create_ms:.1f}ms (run_id={run.id if run else None})")
+
             # use agent loop for streaming
+            _agent_loop_start_ns = get_utc_timestamp_ns()
             agent_loop = AgentLoop.load(agent_state=agent, actor=actor)
+            _agent_loop_ms = (get_utc_timestamp_ns() - _agent_loop_start_ns) / 1_000_000
+            logger.info(f"[TIMING] AgentLoop 생성 완료: {_agent_loop_ms:.1f}ms")
 
             # create the base stream with error handling
             raw_stream = self._create_error_aware_stream(
