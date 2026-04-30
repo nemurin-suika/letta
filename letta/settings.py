@@ -131,6 +131,27 @@ class ModelSettings(BaseSettings):
 
     # openai
     openai_api_key: Optional[str] = None
+    openai_api_keys: Optional[str] = Field(
+        default=None,
+        description="Comma-separated list of OpenAI API keys for automatic rotation on 429 errors. "
+        "Combined with openai_api_key; duplicates are ignored.",
+    )
+
+    @property
+    def all_openai_api_keys(self) -> list[str]:
+        """All configured OpenAI API keys, deduplicated (primary key first)."""
+        seen: set[str] = set()
+        keys: list[str] = []
+        candidates = []
+        if self.openai_api_key:
+            candidates.append(self.openai_api_key)
+        if self.openai_api_keys:
+            candidates.extend(k.strip() for k in self.openai_api_keys.split(",") if k.strip())
+        for k in candidates:
+            if k not in seen:
+                seen.add(k)
+                keys.append(k)
+        return keys
     openai_api_base: str = Field(
         default="https://api.openai.com/v1",
         # NOTE: We previously used OPENAI_API_BASE, but this was deprecated in favor of OPENAI_BASE_URL
@@ -178,7 +199,28 @@ class ModelSettings(BaseSettings):
 
     # anthropic
     anthropic_api_key: Optional[str] = None
+    anthropic_api_keys: Optional[str] = Field(
+        default=None,
+        description="Comma-separated list of Anthropic API keys for automatic rotation on 429 errors. "
+        "Combined with anthropic_api_key; duplicates are ignored.",
+    )
     anthropic_max_retries: int = 3
+
+    @property
+    def all_anthropic_api_keys(self) -> list[str]:
+        """All configured Anthropic API keys, deduplicated (primary key first)."""
+        seen: set[str] = set()
+        keys: list[str] = []
+        candidates = []
+        if self.anthropic_api_key:
+            candidates.append(self.anthropic_api_key)
+        if self.anthropic_api_keys:
+            candidates.extend(k.strip() for k in self.anthropic_api_keys.split(",") if k.strip())
+        for k in candidates:
+            if k not in seen:
+                seen.add(k)
+                keys.append(k)
+        return keys
     anthropic_sonnet_1m: bool = Field(
         default=False,
         description=(

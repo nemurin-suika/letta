@@ -1003,6 +1003,14 @@ class ProviderManager:
                 provider_category=ProviderCategory.base,
             )
 
+        # Normalize handles that use '@' as a version separator (e.g. anthropic/claude-haiku-4-5@20251001).
+        # Some client SDK versions format versioned model IDs this way; Letta stores handles with
+        # dashes (e.g. anthropic/claude-haiku-4-5) so we strip the @version suffix and retry.
+        if "@" in handle:
+            handle_without_version = handle.split("@")[0]
+            logger.debug(f"Normalizing handle '{handle}' → '{handle_without_version}' (stripping @version suffix)")
+            handle = handle_without_version
+
         # Look up the model by handle in the database (for base providers)
         model = await self.get_model_by_handle_async(handle=handle, actor=actor, model_type="llm")
 

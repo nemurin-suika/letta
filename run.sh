@@ -1,10 +1,8 @@
 #!/bin/bash
 
-# Gemini API 키 목록 - 429 발생 시 자동으로 다음 키로 전환됨
-# 키를 추가하려면 아래 배열에 원소를 추가하기만 하면 됨
 source ~/.secrets
 
-# 첫 번째 키를 기본값으로, 전체 목록을 쉼표로 구분해서 전달
+# Gemini API 키 (embedding 모델용) - 429 발생 시 자동으로 다음 키로 전환됨
 GEMINI_API_KEY="${GEMINI_KEYS[0]}"
 GEMINI_API_KEYS="$(IFS=,; echo "${GEMINI_KEYS[*]}")"
 

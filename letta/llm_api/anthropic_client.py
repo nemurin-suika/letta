@@ -2,6 +2,7 @@ import copy
 import json
 import logging
 import re
+import threading
 from typing import Dict, List, Optional, Union
 
 import anthropic
@@ -58,6 +59,23 @@ from letta.settings import model_settings
 DUMMY_FIRST_USER_MESSAGE = "User initializing bootup sequence."
 
 logger = get_logger(__name__)
+
+
+class _KeyRotator:
+    """Thread-safe round-robin index for Anthropic API key selection."""
+
+    def __init__(self) -> None:
+        self._index = 0
+        self._lock = threading.Lock()
+
+    def next_start(self, num_keys: int) -> int:
+        with self._lock:
+            idx = self._index
+            self._index = (self._index + 1) % num_keys
+            return idx
+
+
+_key_rotator = _KeyRotator()
 
 
 class AnthropicClient(LLMClientBase):
@@ -135,9 +153,29 @@ class AnthropicClient(LLMClientBase):
 
     @trace_method
     async def request_async(self, request_data: dict, llm_config: LLMConfig) -> dict:
+        keys = model_settings.all_anthropic_api_keys
+        if len(keys) <= 1:
+            return await self._request_async_with_key(request_data, llm_config, keys[0] if keys else None)
+
+        start = _key_rotator.next_start(len(keys))
+        last_error: Optional[LLMRateLimitError] = None
+        for attempt in range(len(keys)):
+            key = keys[(start + attempt) % len(keys)]
+            try:
+                return await self._request_async_with_key(request_data, llm_config, key)
+            except LLMRateLimitError as e:
+                last_error = e
+                logger.warning(
+                    f"[Anthropic] Key #{(start + attempt) % len(keys) + 1} rate limited (429), "
+                    f"rotating to next key ({attempt + 1}/{len(keys)} tried)"
+                )
+        assert last_error is not None
+        raise last_error
+
+    async def _request_async_with_key(self, request_data: dict, llm_config: LLMConfig, api_key: Optional[str]) -> dict:
         request_data = sanitize_unicode_surrogates(request_data)
 
-        client = await self._get_anthropic_client_async(llm_config, async_client=True)
+        client = await self._get_anthropic_client_async(llm_config, async_client=True, api_key_override=api_key)
         betas: list[str] = []
 
         # Opus 4.6 / Sonnet 4.6 Auto Thinking
@@ -462,9 +500,11 @@ class AnthropicClient(LLMClientBase):
 
     @trace_method
     async def _get_anthropic_client_async(
-        self, llm_config: LLMConfig, async_client: bool = False
+        self, llm_config: LLMConfig, async_client: bool = False, api_key_override: Optional[str] = None
     ) -> Union[anthropic.AsyncAnthropic, anthropic.Anthropic]:
-        api_key, _, _ = await self.get_byok_overrides_async(llm_config)
+        api_key = api_key_override
+        if not api_key:
+            api_key, _, _ = await self.get_byok_overrides_async(llm_config)
 
         # For claude-pro-max provider, use OAuth Bearer token instead of api_key
         is_oauth_provider = llm_config.provider_name == "claude-pro-max"

@@ -40,7 +40,6 @@ from letta.log import get_logger
 from letta.otel.tracing import trace_method
 from letta.schemas.agent import AgentType
 from letta.schemas.enums import ProviderCategory
-from letta.schemas.letta_message_content import TextContent
 from letta.schemas.llm_config import LLMConfig
 from letta.schemas.message import Message as PydanticMessage
 from letta.schemas.openai.chat_completion_request import Tool, Tool as OpenAITool
@@ -452,17 +451,27 @@ class GoogleVertexClient(LLMClientBase):
             formatted_tools = []
             tool_names = []
 
-        request_messages = messages
+        # Determine system instruction text. Prefer the explicit `system` override, then
+        # fall back to messages[0] if it carries a system role.
+        system_instruction_text: Optional[str] = None
         if system is not None:
-            from letta.schemas.letta_message_content import TextContent
+            system_instruction_text = system
+        elif messages and messages[0].role == "system":
+            content = messages[0].content
+            if content and len(content) == 1:
+                from letta.schemas.letta_message_content import TextContent as _TC
 
-            if not messages:
-                raise RuntimeError("Cannot override system prompt because messages is empty")
-            if messages[0].role != "system":
-                raise RuntimeError(f"First message is not a system message, instead has role {messages[0].role}")
-            system_message = messages[0].model_copy(deep=True)
-            system_message.content = [TextContent(text=system)]
-            request_messages = [system_message, *messages[1:]]
+                if isinstance(content[0], _TC):
+                    system_instruction_text = content[0].text
+
+        # Drop the system message from the conversation history: it will be sent via
+        # system_instruction instead. Gemini treats system_instruction as a persistent,
+        # top-priority directive that remains equally influential regardless of how long
+        # the conversation history grows — unlike a user-role message at position 0.
+        if messages and messages[0].role == "system":
+            request_messages = messages[1:]
+        else:
+            request_messages = messages
 
         contents = self.add_dummy_model_messages(
             PydanticMessage.to_google_dicts_from_list(
@@ -473,12 +482,16 @@ class GoogleVertexClient(LLMClientBase):
             ),
         )
 
+        config: dict = {
+            "temperature": llm_config.temperature,
+            "tools": formatted_tools,
+        }
+        if system_instruction_text:
+            config["system_instruction"] = system_instruction_text
+
         request_data = {
             "contents": contents,
-            "config": {
-                "temperature": llm_config.temperature,
-                "tools": formatted_tools,
-            },
+            "config": config,
         }
         # Make tokens is optional
         if llm_config.max_tokens:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import threading
 import time
 from typing import Any, AsyncIterator, List, Optional
 
@@ -69,6 +70,68 @@ from letta.schemas.usage import LettaUsageStatistics
 from letta.settings import model_settings
 
 logger = get_logger(__name__)
+
+
+class _KeyRotator:
+    """Thread-safe round-robin index for OpenAI API key selection."""
+
+    def __init__(self) -> None:
+        self._index = 0
+        self._lock = threading.Lock()
+
+    def next_start(self, num_keys: int) -> int:
+        with self._lock:
+            idx = self._index
+            self._index = (self._index + 1) % num_keys
+            return idx
+
+
+_key_rotator = _KeyRotator()
+
+
+class _RateLimitRetryStream:
+    """Wraps an OpenAI AsyncStream and transparently retries with the next API key on rate limit.
+
+    Rate-limit errors (openai.APIError with 'rate limit' in the message) that arise
+    during stream iteration are caught here. The stream is restarted from the beginning
+    with the next key in the rotation. Since TPM-based rate limits are checked before
+    any output tokens are generated, no content is lost on retry.
+    """
+
+    def __init__(self, create_fn, keys: list, start: int):
+        self._create_fn = create_fn  # async (key: str) → AsyncStream
+        self._keys = keys
+        self._attempt = 0
+        self._start = start
+        self._stream = None
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        while True:
+            if self._stream is None:
+                key = self._keys[(self._start + self._attempt) % len(self._keys)]
+                self._stream = await self._create_fn(key)
+            try:
+                return await self._stream.__anext__()
+            except StopAsyncIteration:
+                raise
+            except openai.APIError as e:
+                if "rate limit" not in str(e).lower():
+                    raise
+                self._attempt += 1
+                self._stream = None
+                if self._attempt >= len(self._keys):
+                    raise LLMRateLimitError(
+                        message=f"[OpenAI] All {len(self._keys)} keys rate limited: {e}",
+                        code=ErrorCode.RATE_LIMIT_EXCEEDED,
+                    )
+                logger.warning(
+                    f"[OpenAI] Key #{(self._start + self._attempt - 1) % len(self._keys) + 1} "
+                    f"rate limited during streaming, rotating to next key "
+                    f"({self._attempt}/{len(self._keys)} tried)"
+                )
 
 
 def is_openai_reasoning_model(model: str) -> bool:
@@ -214,9 +277,13 @@ class OpenAIClient(LLMClientBase):
         kwargs = {"api_key": api_key, "base_url": embedding_config.embedding_endpoint}
         return kwargs
 
-    async def _prepare_client_kwargs_async(self, llm_config: LLMConfig) -> dict:
-        api_key, _, _ = await self.get_byok_overrides_async(llm_config)
-        has_byok_key = api_key is not None  # Track if we got a BYOK key
+    async def _prepare_client_kwargs_async(self, llm_config: LLMConfig, api_key_override: Optional[str] = None) -> dict:
+        if api_key_override:
+            api_key = api_key_override
+            has_byok_key = False
+        else:
+            api_key, _, _ = await self.get_byok_overrides_async(llm_config)
+            has_byok_key = api_key is not None  # Track if we got a BYOK key
 
         if not api_key:
             api_key = model_settings.openai_api_key or os.environ.get("OPENAI_API_KEY")
@@ -768,10 +835,30 @@ class OpenAIClient(LLMClientBase):
         """
         Performs underlying asynchronous request to OpenAI API and returns raw response dict.
         """
+        keys = model_settings.all_openai_api_keys
+        if len(keys) <= 1:
+            return await self._request_async_with_key(request_data, llm_config, keys[0] if keys else None)
+
+        start = _key_rotator.next_start(len(keys))
+        last_error: Optional[LLMRateLimitError] = None
+        for attempt in range(len(keys)):
+            key = keys[(start + attempt) % len(keys)]
+            try:
+                return await self._request_async_with_key(request_data, llm_config, key)
+            except LLMRateLimitError as e:
+                last_error = e
+                logger.warning(
+                    f"[OpenAI] Key #{(start + attempt) % len(keys) + 1} rate limited (429), "
+                    f"rotating to next key ({attempt + 1}/{len(keys)} tried)"
+                )
+        assert last_error is not None
+        raise last_error
+
+    async def _request_async_with_key(self, request_data: dict, llm_config: LLMConfig, api_key: Optional[str]) -> dict:
         # Sanitize Unicode surrogates to prevent encoding errors
         request_data = sanitize_unicode_surrogates(request_data)
 
-        kwargs = await self._prepare_client_kwargs_async(llm_config)
+        kwargs = await self._prepare_client_kwargs_async(llm_config, api_key_override=api_key)
         client = AsyncOpenAI(**kwargs)
         # Route based on payload shape: Responses uses 'input', Chat Completions uses 'messages'
         try:
@@ -1041,31 +1128,32 @@ class OpenAIClient(LLMClientBase):
                 raise
 
         # --- HTTP SSE path (default) ---
-        kwargs = await self._prepare_client_kwargs_async(llm_config)
-        client = AsyncOpenAI(**kwargs)
+        keys = model_settings.all_openai_api_keys
 
-        # Route based on payload shape: Responses uses 'input', Chat Completions uses 'messages'
-        if is_responses_request:
-            try:
-                response_stream: AsyncStream[ResponseStreamEvent] = await client.responses.create(
-                    **request_data,
-                    stream=True,
-                    # stream_options={"include_usage": True},
-                )
-            except Exception as e:
-                logger.error(f"Error streaming OpenAI Responses request: {e} with request data: {json.dumps(request_data)}")
-                raise e
-        else:
-            try:
-                response_stream: AsyncStream[ChatCompletionChunk] = await client.chat.completions.create(
-                    **request_data,
-                    stream=True,
-                    stream_options={"include_usage": True},
-                )
-            except Exception as e:
-                logger.error(f"Error streaming OpenAI Chat Completions request: {e} with request data: {json.dumps(request_data)}")
-                raise e
-        return response_stream
+        async def _create_stream(key: Optional[str]):
+            kwargs = await self._prepare_client_kwargs_async(llm_config, api_key_override=key)
+            client = AsyncOpenAI(**kwargs)
+            if is_responses_request:
+                try:
+                    return await client.responses.create(**request_data, stream=True)
+                except Exception as e:
+                    logger.error(f"Error streaming OpenAI Responses request: {e}")
+                    raise
+            else:
+                try:
+                    return await client.chat.completions.create(
+                        **request_data, stream=True, stream_options={"include_usage": True}
+                    )
+                except Exception as e:
+                    logger.error(f"Error streaming OpenAI Chat Completions request: {e}")
+                    raise
+
+        if len(keys) <= 1:
+            return await _create_stream(keys[0] if keys else None)
+
+        # Multiple keys: return a retry wrapper that rotates on rate limit errors
+        start = _key_rotator.next_start(len(keys))
+        return _RateLimitRetryStream(_create_stream, keys, start)
 
     @trace_method
     async def stream_async_responses(self, request_data: dict, llm_config: LLMConfig) -> AsyncStream[ResponseStreamEvent]:
@@ -1338,6 +1426,14 @@ class OpenAIClient(LLMClientBase):
                         "body": getattr(e, "body", None),
                         "is_byok": is_byok,
                     },
+                )
+            # Rate limit may arrive as a plain APIError during stream iteration
+            if "rate limit" in msg.lower():
+                logger.warning(f"[OpenAI] Rate limited (APIError during streaming): {msg}")
+                return LLMRateLimitError(
+                    message=f"Rate limited by OpenAI: {msg}",
+                    code=ErrorCode.RATE_LIMIT_EXCEEDED,
+                    details={"is_byok": is_byok},
                 )
             return LLMBadRequestError(
                 message=f"OpenAI API error: {msg}",
