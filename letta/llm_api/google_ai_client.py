@@ -1,4 +1,4 @@
-import threading
+import random
 from typing import List, Optional, Tuple
 
 import httpx
@@ -13,24 +13,6 @@ from letta.schemas.llm_config import LLMConfig
 from letta.settings import model_settings
 
 logger = get_logger(__name__)
-
-
-class _KeyRotator:
-    """Thread-safe round-robin index for Gemini API key selection."""
-
-    def __init__(self) -> None:
-        self._index = 0
-        self._lock = threading.Lock()
-
-    def next_start(self, num_keys: int) -> int:
-        """Return the next starting index and advance the counter."""
-        with self._lock:
-            idx = self._index
-            self._index = (self._index + 1) % num_keys
-            return idx
-
-
-_key_rotator = _KeyRotator()
 
 
 class GoogleAIClient(GoogleVertexClient):
@@ -67,17 +49,16 @@ class GoogleAIClient(GoogleVertexClient):
             # Single-key path: delegate to parent (preserves all existing retry logic)
             return await super().request_async(request_data, llm_config)
 
-        start = _key_rotator.next_start(len(keys))
+        shuffled_keys = random.sample(keys, len(keys))
         last_error: Optional[LLMRateLimitError] = None
-        for attempt in range(len(keys)):
-            key = keys[(start + attempt) % len(keys)]
+        for attempt, key in enumerate(shuffled_keys):
             try:
                 return await self._request_async_with_key(request_data, llm_config, key)
             except LLMRateLimitError as e:
                 last_error = e
                 logger.warning(
-                    f"[GoogleAI] Key #{(start + attempt) % len(keys) + 1} rate limited (429), "
-                    f"rotating to next key ({attempt + 1}/{len(keys)} tried)"
+                    f"[GoogleAI] Key #{attempt + 1} rate limited (429), "
+                    f"rotating to next key ({attempt + 1}/{len(shuffled_keys)} tried)"
                 )
         assert last_error is not None
         raise last_error
@@ -144,10 +125,9 @@ class GoogleAIClient(GoogleVertexClient):
                 yield chunk
             return
 
-        start = _key_rotator.next_start(len(keys))
+        shuffled_keys = random.sample(keys, len(keys))
         last_error: Optional[LLMRateLimitError] = None
-        for attempt in range(len(keys)):
-            key = keys[(start + attempt) % len(keys)]
+        for attempt, key in enumerate(shuffled_keys):
             try:
                 async for chunk in self._stream_async_with_key(request_data, llm_config, key):
                     yield chunk
@@ -155,8 +135,8 @@ class GoogleAIClient(GoogleVertexClient):
             except LLMRateLimitError as e:
                 last_error = e
                 logger.warning(
-                    f"[GoogleAI] Key #{(start + attempt) % len(keys) + 1} rate limited (429) during stream, "
-                    f"rotating to next key ({attempt + 1}/{len(keys)} tried)"
+                    f"[GoogleAI] Key #{attempt + 1} rate limited (429) during stream, "
+                    f"rotating to next key ({attempt + 1}/{len(shuffled_keys)} tried)"
                 )
         assert last_error is not None
         raise last_error
