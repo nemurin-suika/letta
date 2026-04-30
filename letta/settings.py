@@ -303,6 +303,26 @@ class ModelSettings(BaseSettings):
     openllm_auth_type: Optional[str] = None
     openllm_api_key: Optional[str] = None
 
+    # LLM fallback on rate limit
+    llm_fallback_config: Optional[str] = Field(
+        default=None,
+        description=(
+            "Env var: LLM_FALLBACK_CONFIG. "
+            "JSON string of fallback LLMConfig to use when the primary LLM returns a rate limit error (429). "
+            "Example for Ollama: "
+            "'{\"model\": \"llama3.1\", \"model_endpoint_type\": \"openai\", "
+            "\"model_endpoint\": \"http://localhost:11434/v1\", \"context_window\": 8192}'"
+        ),
+    )
+    llm_fallback_trigger_providers: str = Field(
+        default="google_ai,google_vertex",
+        description=(
+            "Env var: LLM_FALLBACK_TRIGGER_PROVIDERS. "
+            "Comma-separated list of handle prefixes (provider names) that trigger the fallback "
+            "when a rate limit error occurs. Defaults to 'google_ai,google_vertex'."
+        ),
+    )
+
 
 env_cors_origins = os.getenv("ACCEPTABLE_ORIGINS")
 

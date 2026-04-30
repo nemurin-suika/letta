@@ -8,7 +8,7 @@ from opentelemetry.trace import Span
 from letta.adapters.letta_llm_adapter import LettaLLMAdapter
 from letta.adapters.sglang_native_adapter import SGLangNativeAdapter
 from letta.adapters.simple_llm_request_adapter import SimpleLLMRequestAdapter
-from letta.adapters.simple_llm_stream_adapter import SimpleLLMStreamAdapter
+from letta.adapters.simple_llm_stream_adapter import STREAMING_SUPPORTED_PROVIDERS, SimpleLLMStreamAdapter
 from letta.agents.helpers import (
     _build_rule_violation_result,
     _load_last_function_response,
@@ -23,6 +23,7 @@ from letta.agents.letta_agent_v2 import LettaAgentV2
 from letta.constants import DEFAULT_MAX_STEPS, NON_USER_MSG_PREFIX, REQUEST_HEARTBEAT_PARAM
 from letta.errors import (
     ContextWindowExceededError,
+    LLMBadRequestError,
     LLMEmptyResponseError,
     LLMError,
     LLMProviderOverloaded,
@@ -1120,6 +1121,8 @@ class LettaAgentV3(LettaAgentV2):
                     active_llm_client = self.llm_client
 
                 force_tool_call = valid_tools[0]["name"] if len(valid_tools) == 1 and self._require_tool_call else None
+                # fallback 모델이 tool을 지원하지 않을 때 빈 리스트로 교체되는 작업 복사본
+                _effective_tools = list(valid_tools)
                 for llm_request_attempt in range(summarizer_settings.max_summarizer_retries + 1):
                     try:
                         _build_req_start_ns = get_utc_timestamp_ns()
@@ -1127,12 +1130,13 @@ class LettaAgentV3(LettaAgentV2):
                             client_skills=self.client_skills,
                             current_system_message=messages[0],
                         )
+                        _effective_force_tool_call = force_tool_call if _effective_tools else None
                         request_data = active_llm_client.build_request_data(
                             agent_type=self.agent_state.agent_type,
                             messages=messages,
                             llm_config=active_llm_config,
-                            tools=valid_tools,
-                            force_tool_call=force_tool_call,
+                            tools=_effective_tools,
+                            force_tool_call=_effective_force_tool_call,
                             requires_subsequent_tool_call=self._require_tool_call,
                             tool_return_truncation_chars=self._compute_tool_return_truncation_chars(),
                             system=request_system_prompt,
@@ -1185,16 +1189,16 @@ class LettaAgentV3(LettaAgentV2):
 
                         _llm_invoke_start_ns = get_utc_timestamp_ns()
                         self.logger.info(
-                            f"[TIMING] LLM 호출 시작: model={active_llm_config.model}, provider={active_llm_config.model_endpoint_type}, tools={len(valid_tools)}개"
+                            f"[TIMING] LLM 호출 시작: model={active_llm_config.model}, provider={active_llm_config.model_endpoint_type}, tools={len(_effective_tools)}개"
                         )
                         step_progression, step_metrics = self._step_checkpoint_llm_request_start(step_metrics, agent_step_span)
                         invocation = llm_adapter.invoke_llm(
                             request_data=request_data,
                             messages=messages,
-                            tools=valid_tools,
+                            tools=_effective_tools,
                             use_assistant_message=False,  # NOTE: set to false
                             requires_approval_tools=self.tool_rules_solver.get_requires_approval_tools(
-                                set([t["name"] for t in valid_tools])
+                                set([t["name"] for t in _effective_tools])
                             )
                             + [ct.name for ct in self.client_tools],
                             step_id=step_id,
@@ -1241,9 +1245,37 @@ class LettaAgentV3(LettaAgentV2):
                                 put_inner_thoughts_first=True,
                                 actor=self.actor,
                             )
-                            llm_adapter.llm_client = active_llm_client
-                            llm_adapter.llm_config = active_llm_config
+
+                            # 스트리밍 어댑터를 사용 중이지만 fallback provider가 스트리밍 미지원인 경우
+                            # (예: ollama) 비스트리밍 어댑터로 교체
+                            if (
+                                isinstance(llm_adapter, SimpleLLMStreamAdapter)
+                                and fallback_config.model_endpoint_type not in STREAMING_SUPPORTED_PROVIDERS
+                            ):
+                                llm_adapter = SimpleLLMRequestAdapter(
+                                    llm_client=active_llm_client,
+                                    llm_config=active_llm_config,
+                                    call_type=llm_adapter.call_type,
+                                    agent_id=llm_adapter.agent_id,
+                                    agent_tags=llm_adapter.agent_tags,
+                                    run_id=llm_adapter.run_id,
+                                    org_id=llm_adapter.org_id,
+                                    user_id=llm_adapter.user_id,
+                                    billing_context=llm_adapter.billing_context,
+                                )
+                            else:
+                                llm_adapter.llm_client = active_llm_client
+                                llm_adapter.llm_config = active_llm_config
                             is_primary = False
+                            continue
+                        self.stop_reason = LettaStopReason(stop_reason=StopReasonType.llm_api_error.value)
+                        raise e
+                    except LLMBadRequestError as e:
+                        if "does not support tools" in str(e) and _effective_tools:
+                            self.logger.warning(
+                                f"[LLM ROUTER]: {active_llm_config.model} does not support tools, retrying without tools"
+                            )
+                            _effective_tools = []
                             continue
                         self.stop_reason = LettaStopReason(stop_reason=StopReasonType.llm_api_error.value)
                         raise e

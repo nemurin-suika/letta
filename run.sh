@@ -13,6 +13,11 @@ GEMINI_API_KEYS="$(IFS=,; echo "${GEMINI_KEYS[*]}")"
 
 mkdir -p ~/.letta/.persist/pgdata
 
+# Ollama fallback 설정 (Google 429 시 로컬 Ollama로 자동 전환)
+OLLAMA_FALLBACK_MODEL="dolphin3:latest"
+OLLAMA_ENDPOINT="http://host.docker.internal:11434/v1"
+LLM_FALLBACK_CONFIG="{\"model\": \"${OLLAMA_FALLBACK_MODEL}\", \"model_endpoint_type\": \"ollama\", \"model_endpoint\": \"${OLLAMA_ENDPOINT}\", \"context_window\": 32768}"
+
 echo "[Letta] Docker 컨테이너 시작..."
 docker run \
   -v ~/.letta/.persist/pgdata:/var/lib/postgresql/data \
@@ -20,4 +25,5 @@ docker run \
   --add-host=host.docker.internal:host-gateway \
   -e GEMINI_API_KEY="$GEMINI_API_KEY" \
   -e GEMINI_API_KEYS="$GEMINI_API_KEYS" \
+  -e LLM_FALLBACK_CONFIG="$LLM_FALLBACK_CONFIG" \
   letta/letta:nemurin

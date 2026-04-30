@@ -21,6 +21,25 @@ from letta.settings import settings
 from letta.utils import safe_create_task
 
 
+STREAMING_SUPPORTED_PROVIDERS = frozenset(
+    {
+        ProviderType.anthropic,
+        ProviderType.bedrock,
+        ProviderType.minimax,
+        ProviderType.openai,
+        ProviderType.deepseek,
+        ProviderType.openrouter,
+        ProviderType.zai,
+        ProviderType.zai_coding,
+        ProviderType.baseten,
+        ProviderType.fireworks,
+        ProviderType.chatgpt_oauth,
+        ProviderType.google_ai,
+        ProviderType.google_vertex,
+    }
+)
+
+
 class SimpleLLMStreamAdapter(LettaLLMStreamAdapter):
     """
     Adapter for handling streaming LLM requests with immediate token yielding.

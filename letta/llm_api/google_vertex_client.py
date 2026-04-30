@@ -961,6 +961,15 @@ class GoogleVertexClient(LLMClientBase):
                     code=ErrorCode.TIMEOUT,
                     details={"cause": str(e.__cause__) if e.__cause__ else None, "is_byok": is_byok},
                 )
+            elif e.code == 429:
+                # 429는 항상 rate limit으로 처리 — quota 소진 메시지가 is_insufficient_credits_message에
+                # 매칭되더라도 HTTP 상태코드 우선 적용
+                logger.warning(f"{self._provider_prefix()} Rate limited (429). Consider backoff.")
+                return LLMRateLimitError(
+                    message=f"Rate limited by {self._provider_name()}: {str(e)}",
+                    code=ErrorCode.RATE_LIMIT_EXCEEDED,
+                    details={"is_byok": is_byok},
+                )
             elif e.code == 402 or is_insufficient_credits_message(str(e)):
                 msg = str(e)
                 return LLMInsufficientCreditsError(
@@ -972,13 +981,6 @@ class GoogleVertexClient(LLMClientBase):
                 return LLMUnprocessableEntityError(
                     message=f"Invalid request content for {self._provider_name()}: {str(e)}",
                     code=ErrorCode.INTERNAL_SERVER_ERROR,
-                    details={"is_byok": is_byok},
-                )
-            elif e.code == 429:
-                logger.warning(f"{self._provider_prefix()} Rate limited (429). Consider backoff.")
-                return LLMRateLimitError(
-                    message=f"Rate limited by {self._provider_name()}: {str(e)}",
-                    code=ErrorCode.RATE_LIMIT_EXCEEDED,
                     details={"is_byok": is_byok},
                 )
             else:

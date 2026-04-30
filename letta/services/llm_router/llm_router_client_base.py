@@ -4,11 +4,17 @@ This is the base (OSS/self-hosted) implementation without Redis support.
 The Redis-backed implementation lives in llm_router_client.py.
 """
 
+import json
+import logging
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from letta.schemas.llm_config import LLMConfig
     from letta.schemas.user import User
+
+logger = logging.getLogger(__name__)
+
+_STATIC_FALLBACK_HANDLE = "local/fallback"
 
 
 class LLMRoutingClient:
@@ -63,34 +69,51 @@ class LLMRoutingClient:
             "Auto mode requires Redis for circuit breaker support. Configure Redis or disable auto_mode_enabled in settings."
         )
 
+    def get_fallback_handle(self, handle: str) -> Optional[str]:
+        """Get the fallback handle for a given primary handle.
+
+        Reads LETTA_LLM_FALLBACK_CONFIG and LETTA_LLM_FALLBACK_TRIGGER_PROVIDERS from settings.
+        Returns a static fallback handle when the primary handle's provider prefix matches
+        a configured trigger provider.
+        """
+        from letta.settings import model_settings
+
+        if not model_settings.llm_fallback_config:
+            return None
+
+        trigger_providers = {p.strip() for p in model_settings.llm_fallback_trigger_providers.split(",") if p.strip()}
+        provider_prefix = handle.split("/")[0] if "/" in handle else handle
+        if provider_prefix in trigger_providers:
+            return _STATIC_FALLBACK_HANDLE
+        return None
+
     async def get_fallback_config_for_handle(
         self,
         fallback_handle: str,
         stored_llm_config: "LLMConfig",
         actor: "User",
     ) -> "LLMConfig":
-        """Get a fallback config for any handle (noop in base).
+        """Get a fallback config for the static local fallback handle.
 
-        Args:
-            fallback_handle: The fallback model handle to resolve.
-            stored_llm_config: The agent's stored LLM config.
-            actor: The user actor for provider lookups.
-
-        Raises:
-            RuntimeError: Fallback routing requires Redis for circuit breaker support.
+        Parses the JSON stored in LETTA_LLM_FALLBACK_CONFIG and returns it as an LLMConfig.
         """
-        raise RuntimeError("Fallback routing requires Redis for circuit breaker support.")
+        from letta.schemas.llm_config import LLMConfig
+        from letta.settings import model_settings
 
-    def get_fallback_handle(self, handle: str) -> Optional[str]:
-        """Get the fallback handle for a given primary handle (noop in base).
+        if fallback_handle == _STATIC_FALLBACK_HANDLE and model_settings.llm_fallback_config:
+            try:
+                config_dict = json.loads(model_settings.llm_fallback_config)
+            except json.JSONDecodeError as e:
+                raise RuntimeError(f"LETTA_LLM_FALLBACK_CONFIG is not valid JSON: {e}") from e
+            if "handle" not in config_dict:
+                config_dict["handle"] = _STATIC_FALLBACK_HANDLE
+            logger.info("Loading static fallback LLM config: model=%s", config_dict.get("model"))
+            return LLMConfig(**config_dict)
 
-        Args:
-            handle: The primary model handle.
-
-        Returns:
-            None — no fallback routes configured without Redis.
-        """
-        return None
+        raise RuntimeError(
+            "Fallback routing requires Redis for circuit breaker support, "
+            "or LETTA_LLM_FALLBACK_CONFIG to be set for static fallback."
+        )
 
     def apply_reroute_rules(self, resolved_config, messages, stored_llm_config, agent_state):
         """Apply content-based reroute rules (noop in base)."""
