@@ -136,6 +136,13 @@ class LLMClient:
                     put_inner_thoughts_first=put_inner_thoughts_first,
                     actor=actor,
                 )
+            case ProviderType.claude_cli:
+                from letta.llm_api.claude_cli_client import ClaudeCLIClient
+
+                return ClaudeCLIClient(
+                    put_inner_thoughts_first=put_inner_thoughts_first,
+                    actor=actor,
+                )
             case _:
                 from letta.llm_api.openai_client import OpenAIClient
 

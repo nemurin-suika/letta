@@ -65,6 +65,8 @@ RUN set -eux; \
     # Install Node.js
     curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - && \
     apt-get install -y nodejs && \
+    # Install Claude Code CLI (fallback LLM via claude -p subprocess)
+    npm install -g @anthropic-ai/claude-code && \
     # Download and install OpenTelemetry Collector for the target architecture
     OTEL_FILENAME="otelcol-contrib_${OTEL_VERSION}_linux_${OTEL_ARCH}.tar.gz"; \
     echo "Downloading https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v${OTEL_VERSION}/${OTEL_FILENAME}"; \

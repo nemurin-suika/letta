@@ -54,6 +54,7 @@ class ProviderType(str, Enum):
     anthropic = "anthropic"
     azure = "azure"
     baseten = "baseten"
+    claude_cli = "claude_cli"
     bedrock = "bedrock"
     cerebras = "cerebras"
     chatgpt_oauth = "chatgpt_oauth"

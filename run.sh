@@ -13,14 +13,13 @@ GEMINI_API_KEYS="$(IFS=,; echo "${GEMINI_KEYS[*]}")"
 
 mkdir -p ~/.letta/.persist/pgdata
 
-# Ollama fallback 설정 (Google 429 시 로컬 Ollama로 자동 전환)
-OLLAMA_FALLBACK_MODEL="dolphin3:latest"
-OLLAMA_ENDPOINT="http://host.docker.internal:11434/v1"
-LLM_FALLBACK_CONFIG="{\"model\": \"${OLLAMA_FALLBACK_MODEL}\", \"model_endpoint_type\": \"ollama\", \"model_endpoint\": \"${OLLAMA_ENDPOINT}\", \"context_window\": 32768}"
+# Claude CLI fallback 설정 (Google 429 시 호스트의 claude -p 서브프로세스로 전환)
+LLM_FALLBACK_CONFIG='{"model": "claude-cli", "model_endpoint_type": "claude_cli", "context_window": 200000}'
 
 echo "[Letta] Docker 컨테이너 시작..."
 docker run \
   -v ~/.letta/.persist/pgdata:/var/lib/postgresql/data \
+  -v ~/.claude:/root/.claude \
   -p 8283:8283 \
   --add-host=host.docker.internal:host-gateway \
   -e GEMINI_API_KEY="$GEMINI_API_KEY" \
