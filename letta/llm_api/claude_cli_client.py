@@ -88,16 +88,34 @@ class ClaudeCLIClient(LLMClientBase):
         stderr_text = stderr.decode().strip()
 
         if proc.returncode != 0:
-            logger.error(f"[ClaudeCLI] 실패 (exit {proc.returncode}) stdout={stdout_text!r} stderr={stderr_text!r}")
+            # JSON 응답이 있으면 result 필드에서 실제 오류 메시지 추출
+            error_detail = stderr_text or stdout_text
+            try:
+                error_json = json.loads(stdout_text)
+                error_detail = error_json.get("result") or error_detail
+            except json.JSONDecodeError:
+                pass
+            logger.error(f"[ClaudeCLI] 실패 (exit {proc.returncode}): {error_detail}")
             raise LLMServerError(
-                message=f"claude CLI가 종료 코드 {proc.returncode}로 실패: {stderr_text or stdout_text}",
+                message=f"claude CLI 오류: {error_detail}",
                 code=ErrorCode.INTERNAL_SERVER_ERROR,
             )
 
         try:
-            return json.loads(stdout_text)
+            result = json.loads(stdout_text)
         except json.JSONDecodeError:
             return {"result": stdout_text, "usage": {}}
+
+        # is_error: true 는 exit code 0이어도 내용이 오류인 경우
+        if result.get("is_error"):
+            error_msg = result.get("result") or "claude CLI에서 오류 반환"
+            logger.error(f"[ClaudeCLI] is_error=true: {error_msg}")
+            raise LLMServerError(
+                message=f"claude CLI 오류: {error_msg}",
+                code=ErrorCode.INTERNAL_SERVER_ERROR,
+            )
+
+        return result
 
     # ---------------------------------------------------------------------------
     # Response conversion
