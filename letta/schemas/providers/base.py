@@ -187,6 +187,7 @@ class Provider(ProviderBase):
             ChatGPTOAuthProvider,
             DeepSeekProvider,
             GoogleAIProvider,
+            GoogleLiveProvider,
             GoogleVertexProvider,
             GroqProvider,
             LettaProvider,
@@ -216,6 +217,8 @@ class Provider(ProviderBase):
                 return AnthropicProvider(**self.model_dump(exclude_none=True))
             case ProviderType.google_ai:
                 return GoogleAIProvider(**self.model_dump(exclude_none=True))
+            case ProviderType.google_live:
+                return GoogleLiveProvider(**self.model_dump(exclude_none=True))
             case ProviderType.google_vertex:
                 return GoogleVertexProvider(**self.model_dump(exclude_none=True))
             case ProviderType.azure:

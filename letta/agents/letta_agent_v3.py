@@ -1174,8 +1174,8 @@ class LettaAgentV3(LettaAgentV2):
                                     else:
                                         request_data["parallel_tool_calls"] = False
 
-                            # Gemini (Google AI/Vertex) parallel tool use
-                            elif active_llm_config.model_endpoint_type in ["google_ai", "google_vertex"]:
+                            # Gemini (Google AI/Vertex/Live) parallel tool use
+                            elif active_llm_config.model_endpoint_type in ["google_ai", "google_live", "google_vertex"]:
                                 # Gemini supports parallel tool calling natively through multiple parts in the response
                                 # We just need to ensure the config flag is set for tracking purposes
                                 # The actual handling happens in GoogleVertexClient.convert_response_to_chat_completion
@@ -1210,8 +1210,9 @@ class LettaAgentV3(LettaAgentV2):
                                     yield chunk
                         # Report success to circuit breaker (only for models with fallback routes)
                         routing_client = await get_llm_routing_client()
-                        if routing_client.get_fallback_handle(active_llm_config.handle):
-                            await routing_client.record_success(active_llm_config.handle)
+                        _handle_key = active_llm_config.handle or active_llm_config.model_endpoint_type
+                        if routing_client.get_fallback_handle(_handle_key):
+                            await routing_client.record_success(_handle_key)
                         # If you've reached this point without an error, break out of retry loop
                         break
                     except ValueError as e:
@@ -1223,7 +1224,8 @@ class LettaAgentV3(LettaAgentV2):
                     except (LLMRateLimitError, LLMServerError, LLMProviderOverloaded) as e:
                         # Check if there's a fallback route for the current model
                         routing_client = await get_llm_routing_client()
-                        current_handle = active_llm_config.handle
+                        # handle이 None이면 model_endpoint_type으로 대체 (trigger provider 매칭용)
+                        current_handle = active_llm_config.handle or active_llm_config.model_endpoint_type
                         fallback_handle = routing_client.get_fallback_handle(current_handle)
 
                         if fallback_handle:

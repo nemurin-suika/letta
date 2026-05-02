@@ -37,6 +37,13 @@ class LLMClient:
                     put_inner_thoughts_first=put_inner_thoughts_first,
                     actor=actor,
                 )
+            case ProviderType.google_live:
+                from letta.llm_api.google_live_client import GoogleLiveClient
+
+                return GoogleLiveClient(
+                    put_inner_thoughts_first=put_inner_thoughts_first,
+                    actor=actor,
+                )
             case ProviderType.google_vertex:
                 from letta.llm_api.google_vertex_client import GoogleVertexClient
 

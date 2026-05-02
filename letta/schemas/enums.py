@@ -61,6 +61,7 @@ class ProviderType(str, Enum):
     deepseek = "deepseek"
     fireworks = "fireworks"
     google_ai = "google_ai"
+    google_live = "google_live"
     google_vertex = "google_vertex"
     groq = "groq"
     hugging_face = "hugging-face"

@@ -9,6 +9,7 @@ from .cerebras import CerebrasProvider
 from .chatgpt_oauth import ChatGPTOAuthProvider
 from .deepseek import DeepSeekProvider
 from .google_gemini import GoogleAIProvider
+from .google_live import GoogleLiveProvider
 from .google_vertex import GoogleVertexProvider
 from .groq import GroqProvider
 from .letta import LettaProvider
@@ -33,6 +34,7 @@ __all__ = [
     "ChatGPTOAuthProvider",
     "DeepSeekProvider",
     "GoogleAIProvider",
+    "GoogleLiveProvider",
     "GoogleVertexProvider",
     "GroqProvider",
     "LMStudioOpenAIProvider",

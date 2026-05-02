@@ -35,6 +35,7 @@ STREAMING_SUPPORTED_PROVIDERS = frozenset(
         ProviderType.fireworks,
         ProviderType.chatgpt_oauth,
         ProviderType.google_ai,
+        ProviderType.google_live,
         ProviderType.google_vertex,
     }
 )
@@ -146,7 +147,7 @@ class SimpleLLMStreamAdapter(LettaLLMStreamAdapter):
                     step_id=step_id,
                     cancellation_event=cancellation_event,
                 )
-        elif self.llm_config.model_endpoint_type in [ProviderType.google_ai, ProviderType.google_vertex]:
+        elif self.llm_config.model_endpoint_type in [ProviderType.google_ai, ProviderType.google_live, ProviderType.google_vertex]:
             self.interface = SimpleGeminiStreamingInterface(
                 model=self.llm_config.model,
                 requires_approval_tools=requires_approval_tools,

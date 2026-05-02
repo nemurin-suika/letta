@@ -69,20 +69,26 @@ class LLMRoutingClient:
             "Auto mode requires Redis for circuit breaker support. Configure Redis or disable auto_mode_enabled in settings."
         )
 
-    def get_fallback_handle(self, handle: str) -> Optional[str]:
+    def get_fallback_handle(self, handle: Optional[str]) -> Optional[str]:
         """Get the fallback handle for a given primary handle.
 
-        Reads LETTA_LLM_FALLBACK_CONFIG and LETTA_LLM_FALLBACK_TRIGGER_PROVIDERS from settings.
+        Reads LLM_FALLBACK_CONFIG and LLM_FALLBACK_TRIGGER_PROVIDERS from settings.
         Returns a static fallback handle when the primary handle's provider prefix matches
         a configured trigger provider.
         """
         from letta.settings import model_settings
 
         if not model_settings.llm_fallback_config:
+            logger.debug("[LLM ROUTER] llm_fallback_config 미설정, fallback 비활성화")
+            return None
+
+        if not handle:
+            logger.warning("[LLM ROUTER] handle이 None/빈값, fallback 매칭 불가")
             return None
 
         trigger_providers = {p.strip() for p in model_settings.llm_fallback_trigger_providers.split(",") if p.strip()}
         provider_prefix = handle.split("/")[0] if "/" in handle else handle
+        logger.debug("[LLM ROUTER] fallback 체크: handle=%s prefix=%s triggers=%s", handle, provider_prefix, trigger_providers)
         if provider_prefix in trigger_providers:
             return _STATIC_FALLBACK_HANDLE
         return None

@@ -20,4 +20,10 @@ GOOGLE_MODEL_TO_CONTEXT_LENGTH = {
 
 GOOGLE_EMBEDING_MODEL_TO_DIM = {"text-embedding-005": 768, "text-multilingual-embedding-002": 768}
 
+# Models that only support bidiGenerateContent (Live API / WebSocket)
+GOOGLE_LIVE_MODEL_TO_CONTEXT_LENGTH = {
+    "gemini-3.1-flash-live-preview": 131072,
+    "gemini-live-2.5-flash": 1048576,
+}
+
 GOOGLE_MODEL_FOR_API_KEY_CHECK = "gemini-2.0-flash-lite"
