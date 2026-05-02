@@ -181,6 +181,7 @@ class Provider(ProviderBase):
         from letta.schemas.providers import (
             AnthropicProvider,
             AzureProvider,
+            ClaudeCLIProvider,
             BasetenProvider,
             BedrockProvider,
             CerebrasProvider,
@@ -215,6 +216,8 @@ class Provider(ProviderBase):
                 return OpenAIProvider(**self.model_dump(exclude_none=True))
             case ProviderType.anthropic:
                 return AnthropicProvider(**self.model_dump(exclude_none=True))
+            case ProviderType.claude_cli:
+                return ClaudeCLIProvider(**self.model_dump(exclude_none=True))
             case ProviderType.google_ai:
                 return GoogleAIProvider(**self.model_dump(exclude_none=True))
             case ProviderType.google_live:

@@ -78,7 +78,6 @@ dependencies = [
     "clickhouse-connect>=0.10.0",
     "aiofiles>=24.1.0",
     "async-lru>=2.0.5",
-
 ]
 
 [project.scripts]

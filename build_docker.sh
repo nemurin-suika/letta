@@ -1,2 +1,2 @@
 #!/bin/bash
-docker build . --no-cache -t letta/letta:nemurin
+docker build . -t letta/letta:nemurin

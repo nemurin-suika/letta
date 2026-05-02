@@ -5,6 +5,7 @@ Gemini rate limit 시 fallback으로 사용. API 키 없이 Claude CLI 구독을
 
 import asyncio
 import json
+import os
 import shutil
 import time
 from typing import TYPE_CHECKING, List, Optional
@@ -87,6 +88,8 @@ class ClaudeCLIClient(LLMClientBase):
         stdout_text = stdout.decode().strip()
         stderr_text = stderr.decode().strip()
 
+        self._dump_debug_log(prompt, stdout_text, stderr_text, proc.returncode)
+
         if proc.returncode != 0:
             # JSON 응답이 있으면 result 필드에서 실제 오류 메시지 추출
             error_detail = stderr_text or stdout_text
@@ -116,6 +119,29 @@ class ClaudeCLIClient(LLMClientBase):
             )
 
         return result
+
+    @staticmethod
+    def _dump_debug_log(prompt: str, stdout: str, stderr: str, returncode: Optional[int]) -> None:
+        log_dir = os.environ.get("LETTA_CLAUDE_CLI_DEBUG_DIR", "/app/logs/claude_cli_debug")
+        try:
+            os.makedirs(log_dir, exist_ok=True)
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            path = os.path.join(log_dir, f"{ts}_{int(time.time()*1000) % 100000}.txt")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("=== PROMPT ===\n")
+                f.write(prompt)
+                f.write(f"\n\n=== STDOUT (exit={returncode}) ===\n")
+                f.write(stdout)
+                if stderr:
+                    f.write("\n\n=== STDERR ===\n")
+                    f.write(stderr)
+            msg = f"[ClaudeCLI] 디버그 로그 저장: {path}"
+            print(msg, flush=True)
+            logger.info(msg)
+        except Exception as e:
+            msg = f"[ClaudeCLI] 디버그 로그 저장 실패: {type(e).__name__}: {e} (log_dir={log_dir})"
+            print(msg, flush=True)
+            logger.error(msg)
 
     # ---------------------------------------------------------------------------
     # Response conversion
@@ -240,9 +266,25 @@ class ClaudeCLIClient(LLMClientBase):
 
     @staticmethod
     def _get_content(msg) -> str:
+        from letta.schemas.letta_message_content import TextContent
+
         content = ClaudeCLIClient._get_field(msg, "content") or ""
+
         if isinstance(content, list):
-            content = "\n".join(
-                c.get("text", "") for c in content if isinstance(c, dict) and c.get("type") == "text"
-            )
+            texts = []
+            for c in content:
+                if isinstance(c, TextContent):
+                    texts.append(c.text)
+                elif isinstance(c, dict) and c.get("type") == "text":
+                    texts.append(c.get("text", ""))
+                # ImageContent 등 비텍스트 항목은 건너뜀
+            return "\n".join(texts)
+
+        if isinstance(content, TextContent):
+            return content.text
+
+        # Pydantic 모델이 통째로 넘어오는 경우 — 텍스트 필드만 추출
+        if hasattr(content, "type") and getattr(content, "type", None) != "text":
+            return ""
+
         return str(content)

@@ -33,6 +33,7 @@ class LLMConfig(BaseModel):
         "anthropic",
         "claude_cli",
         "google_ai",
+        "google_live",
         "google_vertex",
         "azure",
         "groq",
@@ -361,6 +362,7 @@ class LLMConfig(BaseModel):
         from letta.schemas.model import (
             AnthropicModelSettings,
             AnthropicThinking,
+            ClaudeCLIModelSettings,
             AzureModelSettings,
             BedrockModelSettings,
             ChatGPTOAuthModelSettings,
@@ -397,6 +399,10 @@ class LLMConfig(BaseModel):
                 reasoning=OpenAIReasoning(reasoning_effort=self.reasoning_effort or "minimal"),
                 strict=self.strict,
             )
+        elif self.model_endpoint_type == "claude_cli":
+            return ClaudeCLIModelSettings(
+                max_output_tokens=self.max_tokens or 8192,
+            )
         elif self.model_endpoint_type == "anthropic":
             thinking_type = "enabled" if self.enable_reasoner else "disabled"
             return AnthropicModelSettings(
@@ -407,7 +413,7 @@ class LLMConfig(BaseModel):
                 strict=self.strict,
                 effort=self.effort,
             )
-        elif self.model_endpoint_type == "google_ai":
+        elif self.model_endpoint_type in ("google_ai", "google_live"):
             return GoogleAIModelSettings(
                 max_output_tokens=self.max_tokens or 65536,
                 temperature=self.temperature,

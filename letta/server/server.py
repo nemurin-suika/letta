@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import shutil
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -50,8 +51,10 @@ from letta.schemas.providers import (
     AzureProvider,
     BasetenProvider,
     BedrockProvider,
+    ClaudeCLIProvider,
     DeepSeekProvider,
     GoogleAIProvider,
+    GoogleLiveProvider,
     GoogleVertexProvider,
     GroqProvider,
     LettaProvider,
@@ -237,10 +240,20 @@ class SyncServer(object):
                     default_prompt_formatter=model_settings.default_prompt_formatter,
                 )
             )
+        if shutil.which("claude"):
+            self._enabled_providers.append(
+                ClaudeCLIProvider(name="claude_cli")
+            )
         if model_settings.gemini_api_key:
             self._enabled_providers.append(
                 GoogleAIProvider(
                     name="google_ai",
+                    api_key_enc=Secret.from_plaintext(model_settings.gemini_api_key),
+                )
+            )
+            self._enabled_providers.append(
+                GoogleLiveProvider(
+                    name="google_live",
                     api_key_enc=Secret.from_plaintext(model_settings.gemini_api_key),
                 )
             )

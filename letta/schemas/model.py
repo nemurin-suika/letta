@@ -331,6 +331,18 @@ class AnthropicModelSettings(ModelSettings):
         }
 
 
+class ClaudeCLIModelSettings(ModelSettings):
+    """claude -p 서브프로세스 클라이언트 설정."""
+
+    provider_type: Literal[ProviderType.claude_cli] = Field(ProviderType.claude_cli, description="The type of the provider.")
+
+    def _to_legacy_config_params(self) -> dict:
+        return {
+            "max_tokens": self.max_output_tokens,
+            "parallel_tool_calls": self.parallel_tool_calls,
+        }
+
+
 class GeminiThinkingConfig(BaseModel):
     include_thoughts: bool = Field(True, description="Whether to include thoughts in the model's response.")
     thinking_budget: int = Field(1024, description="The thinking budget for the model.")
@@ -552,6 +564,7 @@ ModelSettingsUnion = Annotated[
         OpenAIModelSettings,
         SGLangModelSettings,
         AnthropicModelSettings,
+        ClaudeCLIModelSettings,
         GoogleAIModelSettings,
         GoogleVertexModelSettings,
         AzureModelSettings,

@@ -12,6 +12,7 @@ GEMINI_API_KEYS="$(IFS=,; echo "${GEMINI_KEYS[*]}")"
 #   Linux: 이 옵션 없이는 host.docker.internal이 컨테이너에서 사용 불가
 
 mkdir -p ~/.letta/.persist/pgdata
+mkdir -p ~/.letta/logs/claude_cli_debug
 
 # ── Claude CLI 로그인 확인 ────────────────────────────────────────────────────
 # letta-claude-auth 볼륨에 저장된 인증 정보로 로그인 상태 확인
@@ -39,6 +40,7 @@ echo "[Letta] Docker 컨테이너 시작..."
 docker run \
   -v ~/.letta/.persist/pgdata:/var/lib/postgresql/data \
   -v letta-claude-auth:/root/.claude \
+  -v ~/.letta/logs/claude_cli_debug:/app/logs/claude_cli_debug \
   -p 8283:8283 \
   --add-host=host.docker.internal:host-gateway \
   -e GEMINI_API_KEY="$GEMINI_API_KEY" \

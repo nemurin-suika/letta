@@ -16,7 +16,7 @@ import random
 import shutil
 from typing import AsyncIterator, Optional
 
-from letta.errors import LLMError, LLMRateLimitError, LLMServerError
+from letta.errors import ErrorCode, LLMError, LLMRateLimitError, LLMServerError
 from letta.llm_api.google_ai_client import GoogleAIClient
 from letta.log import get_logger
 from letta.schemas.llm_config import LLMConfig
@@ -155,7 +155,7 @@ class GoogleLiveClient(GoogleAIClient):
             async with client.aio.live.connect(
                 model=llm_config.model, config=live_config
             ) as session:
-                await session.send(input=contents, end_of_turn=True)
+                await session.send_client_content(turns=contents, turn_complete=True)
 
                 async for response in session.receive():
                     if hasattr(response, "usage_metadata") and response.usage_metadata:
@@ -181,6 +181,17 @@ class GoogleLiveClient(GoogleAIClient):
         except LLMError:
             raise
         except Exception as e:
+            # WebSocket 연결 오류(1011 internal error 등)는 서버 측 일시 오류이므로
+            # LLMServerError로 매핑해 키 로테이션 → Claude CLI fallback 흐름을 탄다
+            try:
+                from websockets.exceptions import WebSocketException
+                if isinstance(e, WebSocketException):
+                    raise LLMServerError(
+                        message=f"[GoogleLive] WebSocket error: {e}",
+                        code=ErrorCode.INTERNAL_SERVER_ERROR,
+                    ) from e
+            except ImportError:
+                pass
             raise self.handle_llm_error(e, llm_config=llm_config)
 
         parts = []
@@ -241,7 +252,7 @@ class GoogleLiveClient(GoogleAIClient):
             async with client.aio.live.connect(
                 model=llm_config.model, config=live_config
             ) as session:
-                await session.send(input=contents, end_of_turn=True)
+                await session.send_client_content(turns=contents, turn_complete=True)
 
                 async for response in session.receive():
                     if response.server_content and response.server_content.model_turn:
@@ -306,6 +317,15 @@ class GoogleLiveClient(GoogleAIClient):
         except LLMError:
             raise
         except Exception as e:
+            try:
+                from websockets.exceptions import WebSocketException
+                if isinstance(e, WebSocketException):
+                    raise LLMServerError(
+                        message=f"[GoogleLive] WebSocket error: {e}",
+                        code=ErrorCode.INTERNAL_SERVER_ERROR,
+                    ) from e
+            except ImportError:
+                pass
             raise self.handle_llm_error(e, llm_config=llm_config)
 
     # ------------------------------------------------------------------ #
@@ -410,23 +430,15 @@ class GoogleLiveClient(GoogleAIClient):
     def _build_live_config(self, config: dict):
         from google.genai import types
 
-        generation_config_kwargs = {}
+        kwargs: dict = {"response_modalities": ["TEXT"]}
+
         if config.get("temperature") is not None:
-            generation_config_kwargs["temperature"] = config["temperature"]
+            kwargs["temperature"] = config["temperature"]
         if config.get("max_output_tokens"):
-            generation_config_kwargs["max_output_tokens"] = config["max_output_tokens"]
-
-        live_config = types.LiveConnectConfig(
-            response_modalities=["TEXT"],
-            generation_config=types.GenerationConfig(**generation_config_kwargs)
-            if generation_config_kwargs
-            else None,
-        )
-
+            kwargs["max_output_tokens"] = config["max_output_tokens"]
         if config.get("system_instruction"):
-            live_config.system_instruction = config["system_instruction"]
-
+            kwargs["system_instruction"] = config["system_instruction"]
         if config.get("tools"):
-            live_config.tools = config["tools"]
+            kwargs["tools"] = config["tools"]
 
-        return live_config
+        return types.LiveConnectConfig(**kwargs)

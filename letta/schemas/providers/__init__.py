@@ -8,6 +8,7 @@ from .bedrock import BedrockProvider
 from .cerebras import CerebrasProvider
 from .chatgpt_oauth import ChatGPTOAuthProvider
 from .deepseek import DeepSeekProvider
+from .claude_cli import ClaudeCLIProvider
 from .google_gemini import GoogleAIProvider
 from .google_live import GoogleLiveProvider
 from .google_vertex import GoogleVertexProvider
@@ -28,6 +29,7 @@ from .zai import ZAICodingProvider, ZAIProvider
 __all__ = [
     "AnthropicProvider",
     "AzureProvider",
+    "ClaudeCLIProvider",
     "BasetenProvider",
     "BedrockProvider",
     "CerebrasProvider",
