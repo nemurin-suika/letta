@@ -48,8 +48,9 @@ if not settings.disable_sqlalchemy_pooling:
         "statement_cache_size": 0,
         "prepared_statement_cache_size": 0,
     }
-    # Only add SSL if not already specified in connection string
-    if "sslmode" not in async_pg_uri and "ssl" not in async_pg_uri:
+    # localhost 접속이거나 URI에 이미 ssl/sslmode가 지정된 경우 SSL 강제 생략
+    _is_local = any(h in async_pg_uri for h in ("localhost", "127.0.0.1", "::1"))
+    if not _is_local and "sslmode" not in async_pg_uri and "ssl" not in async_pg_uri:
         connect_args["ssl"] = "require"
 
     engine_args["connect_args"] = connect_args

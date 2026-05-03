@@ -116,6 +116,7 @@ class ClaudeCLIClient(LLMClientBase):
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                cwd="/tmp",  # 프로젝트 CLAUDE.md 컨텍스트 격리
             )
             stdout, stderr = await proc.communicate()
         except OSError as e:
