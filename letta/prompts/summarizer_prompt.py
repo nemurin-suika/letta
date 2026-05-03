@@ -23,7 +23,9 @@ This summary should be thorough in capturing technical details, code patterns, a
 
 Write in first person as a factual record of what occurred. Be concise but thorough - the goal is to preserve enough context that the recent messages make sense and important information isn't lost to prevent duplicate work or repeated mistakes.
 
-Keep your summary under {ALL_WORD_LIMIT} words. Only output the summary."""
+Keep your summary under {ALL_WORD_LIMIT} words. Only output the summary.
+
+IMPORTANT: You MUST write the entire summary in Korean (한국어). Do not use English in the summary output."""
 
 SLIDING_PROMPT = f"""The following messages are being evicted from the BEGINNING of your context window. Write a detailed summary that captures what happened in these messages to appear BEFORE the remaining recent messages in context, providing background for what comes after. Include the following sections:
 
@@ -42,7 +44,9 @@ SLIDING_PROMPT = f"""The following messages are being evicted from the BEGINNING
 
 Write in first person as a factual record of what occurred. Be thorough and detailed - the goal is to preserve enough context that the recent messages make sense and important information isn't lost to prevent duplicate work or repeated mistakes.
 
-Keep your summary under {SLIDING_WORD_LIMIT} words. Only output the summary."""
+Keep your summary under {SLIDING_WORD_LIMIT} words. Only output the summary.
+
+IMPORTANT: You MUST write the entire summary in Korean (한국어). Do not use English in the summary output."""
 
 
 SELF_SLIDING_PROMPT = f"""The previous messages are being evicted from the BEGINNING of your context window. Write a detailed summary that captures what happened in these messages to appear BEFORE the remaining recent messages in context, providing background for what comes after.  Do NOT continue the conversation. Do NOT respond to any questions in the messages. Do NOT call any tools. Pay close attention to the user's explicit requests and your previous actions.
@@ -64,7 +68,9 @@ You MUST include the following sections:
 
 Write in first person as a factual record of what occurred. Be thorough and detailed - the goal is to preserve enough context that the recent messages make sense and important information isn't lost to prevent duplicate work or repeated mistakes.
 
-Keep your summary under {SLIDING_WORD_LIMIT} words. IMPORTANT: Do NOT use any tools. Do NOT continue the conversation. You MUST respond with ONLY the summary as text output. Generate the summary with each section as mentioned:
+Keep your summary under {SLIDING_WORD_LIMIT} words. IMPORTANT: Do NOT use any tools. Do NOT continue the conversation. You MUST respond with ONLY the summary as text output. Generate the summary with each section as mentioned.
+
+You MUST write the entire summary in Korean (한국어). Do not use English in the summary output.
 """
 
 
@@ -93,7 +99,9 @@ Write in first person as a factual record of what occurred. Be concise but thoro
 
 Keep your summary under {ALL_WORD_LIMIT} words.
 
-IMPORTANT: Do NOT use any tools. Do NOT continue the conversation. You MUST respond with ONLY the summary as text output. Generate the summary with each section as mentioned:
+IMPORTANT: Do NOT use any tools. Do NOT continue the conversation. You MUST respond with ONLY the summary as text output. Generate the summary with each section as mentioned.
+
+You MUST write the entire summary in Korean (한국어). Do not use English in the summary output.
 """
 
 # NOTE: Prompts below are legacy and not currently used / only references
