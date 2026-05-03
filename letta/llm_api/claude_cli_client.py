@@ -6,9 +6,11 @@ Gemini rate limit 시 fallback으로 사용. API 키 없이 Claude CLI 구독을
 import asyncio
 import json
 import os
+import re
 import shutil
 import time
-from typing import TYPE_CHECKING, List, Optional
+import uuid
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
 from letta.errors import ErrorCode, LLMBadRequestError, LLMConnectionError, LLMError, LLMServerError
 from letta.llm_api.llm_client_base import LLMClientBase
@@ -17,7 +19,9 @@ from letta.schemas.enums import AgentType
 from letta.schemas.openai.chat_completion_response import (
     ChatCompletionResponse,
     Choice,
+    FunctionCall,
     Message,
+    ToolCall,
     UsageStatistics,
 )
 
@@ -26,6 +30,41 @@ if TYPE_CHECKING:
     from letta.schemas.llm_config import LLMConfig
 
 logger = get_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# Core memory 태그 형식 (Claude가 응답 끝에 출력)
+#
+# 추가: <letta_memory_append label="human">내용</letta_memory_append>
+# 교체: <letta_memory_replace label="human"><old>기존</old><new>새것</new></letta_memory_replace>
+# ---------------------------------------------------------------------------
+
+_APPEND_RE = re.compile(
+    r'<letta_memory_append\s+label=["\']?([^"\'>\s]+)["\']?>(.*?)</letta_memory_append>',
+    re.DOTALL,
+)
+_REPLACE_RE = re.compile(
+    r'<letta_memory_replace\s+label=["\']?([^"\'>\s]+)["\']?>'
+    r'\s*<old>(.*?)</old>\s*<new>(.*?)</new>\s*</letta_memory_replace>',
+    re.DOTALL,
+)
+
+MEMORY_INSTRUCTIONS = """\
+
+<letta_memory_instructions>
+당신은 대화 간 지속되는 핵심 메모리(core memory)를 가지고 있습니다.
+위의 <persona>와 <human> 섹션이 현재 메모리 상태입니다. 이 내용을 신뢰하고 참고하세요.
+
+영구적으로 기억해야 할 중요한 새 정보(이름, 선호도, 핵심 사실 등)가 있다면,
+응답 본문 뒤 맨 끝에 아래 태그를 추가하세요. label은 "human" 또는 "persona"입니다.
+
+새 정보 추가:
+<letta_memory_append label="LABEL">기억할 내용</letta_memory_append>
+
+기존 정보 교체/삭제:
+<letta_memory_replace label="LABEL"><old>교체할 기존 텍스트(정확히 일치)</old><new>새로운 텍스트(삭제 시 빈 값)</new></letta_memory_replace>
+
+진짜 중요한 장기 정보만 저장하세요. 메모리 태그는 응답 맨 끝에만 넣으세요.
+</letta_memory_instructions>"""
 
 
 class ClaudeCLIClient(LLMClientBase):
@@ -163,6 +202,11 @@ class ClaudeCLIClient(LLMClientBase):
         prompt_tokens = int(usage_raw.get("input_tokens", 0))
         completion_tokens = int(usage_raw.get("output_tokens", 0))
 
+        # 응답에서 core memory 태그 파싱 및 제거
+        clean_text, tool_calls = self._extract_memory_ops(text)
+
+        finish_reason = "tool_calls" if tool_calls else "stop"
+
         return ChatCompletionResponse(
             id=f"claude-cli-{int(time.time())}",
             object="chat.completion",
@@ -171,8 +215,12 @@ class ClaudeCLIClient(LLMClientBase):
             choices=[
                 Choice(
                     index=0,
-                    message=Message(role="assistant", content=text),
-                    finish_reason="stop",
+                    message=Message(
+                        role="assistant",
+                        content=clean_text or None,
+                        tool_calls=tool_calls if tool_calls else None,
+                    ),
+                    finish_reason=finish_reason,
                 )
             ],
             usage=UsageStatistics(
@@ -181,6 +229,59 @@ class ClaudeCLIClient(LLMClientBase):
                 total_tokens=prompt_tokens + completion_tokens,
             ),
         )
+
+    @staticmethod
+    def _extract_memory_ops(text: str) -> Tuple[str, List[ToolCall]]:
+        """응답 텍스트에서 letta_memory 태그를 추출하고 ToolCall 목록으로 변환."""
+        tool_calls: List[ToolCall] = []
+
+        def _make_id() -> str:
+            return f"call_{uuid.uuid4().hex[:24]}"
+
+        # core_memory_append 태그 처리
+        for match in _APPEND_RE.finditer(text):
+            label = match.group(1).strip()
+            content = match.group(2).strip()
+            tool_calls.append(
+                ToolCall(
+                    id=_make_id(),
+                    type="function",
+                    function=FunctionCall(
+                        name="core_memory_append",
+                        arguments=json.dumps({"label": label, "content": content}, ensure_ascii=False),
+                    ),
+                )
+            )
+
+        # core_memory_replace 태그 처리
+        for match in _REPLACE_RE.finditer(text):
+            label = match.group(1).strip()
+            old_content = match.group(2).strip()
+            new_content = match.group(3).strip()
+            tool_calls.append(
+                ToolCall(
+                    id=_make_id(),
+                    type="function",
+                    function=FunctionCall(
+                        name="core_memory_replace",
+                        arguments=json.dumps(
+                            {"label": label, "old_content": old_content, "new_content": new_content},
+                            ensure_ascii=False,
+                        ),
+                    ),
+                )
+            )
+
+        if tool_calls:
+            # 태그 전체를 응답 텍스트에서 제거
+            clean = _APPEND_RE.sub("", text)
+            clean = _REPLACE_RE.sub("", clean)
+            clean = clean.rstrip()
+            logger.info(f"[ClaudeCLI] core memory 작업 {len(tool_calls)}개 파싱: {[tc.function.name for tc in tool_calls]}")
+        else:
+            clean = text
+
+        return clean, tool_calls
 
     # ---------------------------------------------------------------------------
     # Streaming (미지원 — SimpleLLMRequestAdapter로 교체됨)
@@ -228,7 +329,8 @@ class ClaudeCLIClient(LLMClientBase):
                 break
 
         if sys_content:
-            parts.append(f"<system>\n{sys_content}\n</system>")
+            # 메모리 지시문을 시스템 프롬프트 끝에 붙여 강조
+            parts.append(f"<system>\n{sys_content}{MEMORY_INSTRUCTIONS}\n</system>")
 
         for msg in messages:
             role = self._get_field(msg, "role")
