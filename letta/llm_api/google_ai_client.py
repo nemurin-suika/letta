@@ -5,10 +5,11 @@ import httpx
 from google import genai
 from google.genai.types import HttpOptions
 
-from letta.errors import ErrorCode, LLMAuthenticationError, LLMError, LLMRateLimitError
+from letta.errors import ErrorCode, LLMAuthenticationError, LLMError, LLMPermissionDeniedError, LLMRateLimitError
 from letta.llm_api.google_constants import GOOGLE_MODEL_FOR_API_KEY_CHECK
 from letta.llm_api.google_vertex_client import GoogleVertexClient
 from letta.log import get_logger
+from letta.schemas.embedding_config import EmbeddingConfig
 from letta.schemas.llm_config import LLMConfig
 from letta.settings import model_settings
 
@@ -50,7 +51,7 @@ class GoogleAIClient(GoogleVertexClient):
             return await super().request_async(request_data, llm_config)
 
         shuffled_keys = random.sample(keys, len(keys))
-        last_error: Optional[LLMRateLimitError] = None
+        last_error: Optional[LLMError] = None
         for attempt, key in enumerate(shuffled_keys):
             try:
                 return await self._request_async_with_key(request_data, llm_config, key)
@@ -58,6 +59,12 @@ class GoogleAIClient(GoogleVertexClient):
                 last_error = e
                 logger.warning(
                     f"[GoogleAI] Key #{attempt + 1} rate limited (429), "
+                    f"rotating to next key ({attempt + 1}/{len(shuffled_keys)} tried)"
+                )
+            except LLMPermissionDeniedError as e:
+                last_error = e
+                logger.warning(
+                    f"[GoogleAI] Key #{attempt + 1} permission denied (403), "
                     f"rotating to next key ({attempt + 1}/{len(shuffled_keys)} tried)"
                 )
         assert last_error is not None
@@ -126,7 +133,7 @@ class GoogleAIClient(GoogleVertexClient):
             return
 
         shuffled_keys = random.sample(keys, len(keys))
-        last_error: Optional[LLMRateLimitError] = None
+        last_error: Optional[LLMError] = None
         for attempt, key in enumerate(shuffled_keys):
             try:
                 async for chunk in self._stream_async_with_key(request_data, llm_config, key):
@@ -136,6 +143,12 @@ class GoogleAIClient(GoogleVertexClient):
                 last_error = e
                 logger.warning(
                     f"[GoogleAI] Key #{attempt + 1} rate limited (429) during stream, "
+                    f"rotating to next key ({attempt + 1}/{len(shuffled_keys)} tried)"
+                )
+            except LLMPermissionDeniedError as e:
+                last_error = e
+                logger.warning(
+                    f"[GoogleAI] Key #{attempt + 1} permission denied (403) during stream, "
                     f"rotating to next key ({attempt + 1}/{len(shuffled_keys)} tried)"
                 )
         assert last_error is not None
@@ -179,6 +192,58 @@ class GoogleAIClient(GoogleVertexClient):
             raise self.handle_llm_error(e, llm_config=llm_config)
         except errors.APIError as e:
             raise self.handle_llm_error(e, llm_config=llm_config)
+
+
+    async def request_embeddings(self, texts: List[str], embedding_config: EmbeddingConfig) -> List[List[float]]:
+        """Generate embeddings using Google AI API with key rotation on 403/429."""
+        keys = model_settings.all_gemini_api_keys
+        if len(keys) <= 1:
+            key = keys[0] if keys else (model_settings.gemini_api_key or "")
+            return await self._request_embeddings_with_key(texts, embedding_config, key)
+
+        shuffled_keys = random.sample(keys, len(keys))
+        last_error: Optional[LLMError] = None
+        for attempt, key in enumerate(shuffled_keys):
+            try:
+                return await self._request_embeddings_with_key(texts, embedding_config, key)
+            except LLMRateLimitError as e:
+                last_error = e
+                logger.warning(
+                    f"[GoogleAI] Embedding key #{attempt + 1} rate limited (429), "
+                    f"rotating to next key ({attempt + 1}/{len(shuffled_keys)} tried)"
+                )
+            except LLMPermissionDeniedError as e:
+                last_error = e
+                logger.warning(
+                    f"[GoogleAI] Embedding key #{attempt + 1} permission denied (403), "
+                    f"rotating to next key ({attempt + 1}/{len(shuffled_keys)} tried)"
+                )
+        assert last_error is not None
+        raise last_error
+
+    async def _request_embeddings_with_key(
+        self, texts: List[str], embedding_config: EmbeddingConfig, api_key: str
+    ) -> List[List[float]]:
+        """Call embed_content with a specific API key."""
+        from google.genai import errors
+
+        client = await self._get_client_async(api_key_override=api_key)
+        try:
+            response = await client.aio.models.embed_content(
+                model=embedding_config.embedding_model,
+                contents=texts,
+            )
+        except errors.APIError as e:
+            raise self.handle_llm_error(e)
+        except Exception as e:
+            raise self.handle_llm_error(e)
+
+        if not response.embeddings:
+            raise LLMError(
+                message="Google AI returned empty embeddings",
+                code=ErrorCode.INTERNAL_SERVER_ERROR,
+            )
+        return [list(e.values) for e in response.embeddings]
 
 
 def get_gemini_endpoint_and_headers(

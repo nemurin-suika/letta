@@ -67,7 +67,9 @@ if [ "$MODE" = "local" ]; then
         psql -U "$PG_USER" -d "$PG_DB" -c "CREATE EXTENSION IF NOT EXISTS vector;" 2>/dev/null || true
     }
 
-    # PG 접속 정보는 ~/.letta/pg_uri 파일에서 자동으로 로드됨
+    # ~/.letta/pg_uri 파일로는 pydantic-settings가 불안정하므로 환경변수로 명시
+    # sslmode=disable: 로컬 접속 시 db.py가 ssl=require를 강제하는 것을 방지
+    export LETTA_PG_URI="postgresql://${PG_USER}:${PG_PASSWORD}@localhost:${PG_PORT}/${PG_DB}"
 
     # ── DB 마이그레이션 ─────────────────────────────────────────────────────
     echo "[DB] 데이터베이스 마이그레이션 중..."
