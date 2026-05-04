@@ -200,7 +200,13 @@ class ClaudeCLIClient(LLMClientBase):
             text = response_data.get("result") or ""
             usage_raw = response_data.get("usage") or {}
 
-        prompt_tokens = int(usage_raw.get("input_tokens", 0))
+        # claude CLI는 캐시 토큰을 input_tokens와 별도로 반환하므로 모두 합산
+        # 합산하지 않으면 Letta가 실제 컨텍스트 사용량을 극소로 인식해 압축이 트리거되지 않음
+        prompt_tokens = (
+            int(usage_raw.get("input_tokens", 0))
+            + int(usage_raw.get("cache_creation_input_tokens", 0))
+            + int(usage_raw.get("cache_read_input_tokens", 0))
+        )
         completion_tokens = int(usage_raw.get("output_tokens", 0))
 
         # 응답에서 core memory 태그 파싱 및 제거
