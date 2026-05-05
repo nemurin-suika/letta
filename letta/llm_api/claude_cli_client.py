@@ -48,6 +48,23 @@ _REPLACE_RE = re.compile(
     re.DOTALL,
 )
 
+# [유튜브 링크]URL[/유튜브 링크] 패턴 — Open-LLM-VTuber에서 이미 영상 URL로 교체된 상태로 전달됨
+_YOUTUBE_RE = re.compile(r"\[유튜브 링크\](.*?)\[/유튜브 링크\]", re.DOTALL)
+
+
+def _expand_youtube_links(text: str) -> str:
+    """[유튜브 링크]영상URL[/유튜브 링크]를 WebFetch 지시문으로 변환."""
+    def replace(m: re.Match) -> str:
+        url = m.group(1).strip()
+        return (
+            f"[미즈키가 시청한 유튜브 영상]\n"
+            f"URL: {url}\n"
+            f"WebFetch로 위 URL을 직접 방문해서 영상 내용을 파악하세요. 유튜브 외 다른 사이트는 방문하지 마세요.\n"
+            f"미즈키가 이 영상을 실제로 시청한 것처럼 자연스럽게 반응하세요.\n"
+            f"[/미즈키가 시청한 유튜브 영상]"
+        )
+    return _YOUTUBE_RE.sub(replace, text)
+
 MEMORY_INSTRUCTIONS = """\
 
 <letta_memory_instructions>
@@ -106,7 +123,7 @@ class ClaudeCLIClient(LLMClientBase):
         model = request_data.get("model", "")
 
         # 프롬프트는 -p의 인자로 직접 전달 (stdin은 claude CLI가 지원하지 않음)
-        cmd = ["claude", "-p", prompt, "--output-format", "json"]
+        cmd = ["claude", "-p", prompt, "--output-format", "json", "--allowedTools", "WebFetch"]
         if model and model != "claude-cli":
             cmd.extend(["--model", model])
 
@@ -348,6 +365,7 @@ class ClaudeCLIClient(LLMClientBase):
             tool_calls = self._get_field(msg, "tool_calls") or []
 
             if role == "user":
+                content = _expand_youtube_links(content)
                 parts.append(f"Human: {content}")
             elif role == "assistant":
                 if tool_calls:
