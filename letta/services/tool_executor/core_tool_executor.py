@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 from zoneinfo import ZoneInfo
@@ -299,7 +300,9 @@ class LettaCoreToolExecutor(ToolExecutor):
                 end_datetime=end_datetime,
             )
 
-            return formatted_results
+            if not formatted_results:
+                return "No results found."
+            return json.dumps(formatted_results, ensure_ascii=False)
 
         except Exception as e:
             raise e
