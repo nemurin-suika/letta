@@ -560,6 +560,11 @@ class GoogleVertexClient(LLMClientBase):
                         logger.warning(
                             f"Overriding thinking_budget to {thinking_budget} for model {llm_config.model} which requires thinking mode"
                         )
+                    elif llm_config.model.startswith("gemini-2.5-flash"):
+                        thinking_budget = 1
+                        logger.warning(
+                            f"Overriding thinking_budget to {thinking_budget} for model {llm_config.model} to prevent tool call failures"
+                        )
                 thinking_config = ThinkingConfig(
                     thinking_budget=(thinking_budget),
                     include_thoughts=(thinking_budget > 1),
