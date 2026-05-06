@@ -47,6 +47,15 @@ _REPLACE_RE = re.compile(
     r'\s*<old>(.*?)</old>\s*<new>(.*?)</new>\s*</letta_memory_replace>',
     re.DOTALL,
 )
+_ARCHIVAL_INSERT_RE = re.compile(
+    r'<letta_archival_insert([^>]*)>(.*?)</letta_archival_insert>',
+    re.DOTALL,
+)
+_ARCHIVAL_SEARCH_RE = re.compile(
+    r'<letta_archival_search([^>]*)>(.*?)</letta_archival_search>',
+    re.DOTALL,
+)
+_ATTR_RE = re.compile(r'(\w+)=["\']?([^"\'>\s]*)["\']?')
 
 # [유튜브 링크]URL[/유튜브 링크] 패턴 — Open-LLM-VTuber에서 이미 영상 URL로 교체된 상태로 전달됨
 _YOUTUBE_RE = re.compile(r"\[유튜브 링크\](.*?)\[/유튜브 링크\]", re.DOTALL)
@@ -68,13 +77,15 @@ def _expand_youtube_links(text: str) -> str:
 MEMORY_INSTRUCTIONS = """\
 
 <letta_memory_instructions>
-위의 <persona>와 <human> 섹션이 당신의 현재 장기 기억입니다. 이 내용을 신뢰하고 참고하세요.
+위의 <persona>와 <human> 섹션이 당신의 현재 장기 기억(core memory)입니다. 이 내용을 신뢰하고 참고하세요.
+시스템 프롬프트에 표시된 archival memory 개수도 확인하고, 관련 내용이 있을 것 같으면 검색하세요.
 
 대화 중 **당신의 캐릭터(위 시스템 프롬프트 참조)로서 자연스럽게 "이건 기억해둬야겠다"고 느끼는 순간**이 있다면, 응답 맨 끝에 아래 태그로 저장하세요.
 
 어떤 걸 저장할지는 당신 스스로 판단하세요. 기준이 되는 질문:
 - **human 블록**: "이 사람에 대해 새로 알게 된 건데, 나중에 잊으면 어색하거나 실례가 될까?"
 - **persona 블록**: "나한테 일어난 일인데, 내가 어떤 AI인지를 나타내는 중요한 경험이나 변화일까?"
+- **archival memory**: "너무 상세해서 core 메모리에 담기엔 길지만, 나중에 검색해서 찾을 수 있어야 하는 내용일까?"
 
 특히 아래는 반드시 persona 블록에 기록하세요:
 - 후원/구독 이벤트: 누가, 얼마를, 어떤 말과 함께, 몇 번째 후원인지 (예: "몽팬님 첫 후원 1000원 — 채팅/후원 테스트 겸")
@@ -82,11 +93,21 @@ MEMORY_INSTRUCTIONS = """\
 
 저장 안 해도 되는 것: 지금 이 순간만의 상황, 이미 블록에 있는 내용의 반복.
 
+=== Core Memory (즉시 참조, 핵심 정보) ===
+
 새 정보 추가:
 <letta_memory_append label="LABEL">기억할 내용</letta_memory_append>
 
 기존 정보 교체/수정:
 <letta_memory_replace label="LABEL"><old>교체할 기존 텍스트(정확히 일치)</old><new>새로운 텍스트(삭제 시 빈 값)</new></letta_memory_replace>
+
+=== Archival Memory (대용량 장기 저장, 검색으로 조회) ===
+
+저장 (tags는 선택사항, 쉼표 구분):
+<letta_archival_insert tags="태그1,태그2">저장할 내용</letta_archival_insert>
+
+검색 (관련 기억이 archival에 있을 것 같을 때):
+<letta_archival_search>검색 쿼리</letta_archival_search>
 
 메모리 태그는 응답 맨 끝에만 추가하세요.
 </letta_memory_instructions>"""
@@ -264,7 +285,7 @@ class ClaudeCLIClient(LLMClientBase):
 
     @staticmethod
     def _extract_memory_ops(text: str) -> Tuple[str, List[ToolCall]]:
-        """응답 텍스트에서 letta_memory 태그를 추출하고 ToolCall 목록으로 변환."""
+        """응답 텍스트에서 letta_memory / letta_archival 태그를 추출하고 ToolCall 목록으로 변환."""
         tool_calls: List[ToolCall] = []
 
         def _make_id() -> str:
@@ -304,12 +325,58 @@ class ClaudeCLIClient(LLMClientBase):
                 )
             )
 
+        # archival_memory_insert 태그 처리
+        for match in _ARCHIVAL_INSERT_RE.finditer(text):
+            attrs = {m.group(1): m.group(2) for m in _ATTR_RE.finditer(match.group(1))}
+            content = match.group(2).strip()
+            tags_str = attrs.get("tags", "")
+            tags = [t.strip() for t in tags_str.split(",") if t.strip()] if tags_str else None
+            args: dict = {"content": content}
+            if tags:
+                args["tags"] = tags
+            tool_calls.append(
+                ToolCall(
+                    id=_make_id(),
+                    type="function",
+                    function=FunctionCall(
+                        name="archival_memory_insert",
+                        arguments=json.dumps(args, ensure_ascii=False),
+                    ),
+                )
+            )
+
+        # archival_memory_search 태그 처리
+        for match in _ARCHIVAL_SEARCH_RE.finditer(text):
+            attrs = {m.group(1): m.group(2) for m in _ATTR_RE.finditer(match.group(1))}
+            query = match.group(2).strip()
+            top_k_str = attrs.get("top_k", "")
+            tags_str = attrs.get("tags", "")
+            top_k = int(top_k_str) if top_k_str.isdigit() else None
+            tags = [t.strip() for t in tags_str.split(",") if t.strip()] if tags_str else None
+            args = {"query": query}
+            if top_k:
+                args["top_k"] = top_k
+            if tags:
+                args["tags"] = tags
+            tool_calls.append(
+                ToolCall(
+                    id=_make_id(),
+                    type="function",
+                    function=FunctionCall(
+                        name="archival_memory_search",
+                        arguments=json.dumps(args, ensure_ascii=False),
+                    ),
+                )
+            )
+
         if tool_calls:
             # 태그 전체를 응답 텍스트에서 제거
             clean = _APPEND_RE.sub("", text)
             clean = _REPLACE_RE.sub("", clean)
+            clean = _ARCHIVAL_INSERT_RE.sub("", clean)
+            clean = _ARCHIVAL_SEARCH_RE.sub("", clean)
             clean = clean.rstrip()
-            logger.info(f"[ClaudeCLI] core memory 작업 {len(tool_calls)}개 파싱: {[tc.function.name for tc in tool_calls]}")
+            logger.info(f"[ClaudeCLI] 메모리 작업 {len(tool_calls)}개 파싱: {[tc.function.name for tc in tool_calls]}")
         else:
             clean = text
 
