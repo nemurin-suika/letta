@@ -13,6 +13,7 @@ from letta.schemas.providers.base import Provider
 CLAUDE_CLI_MODELS = {
     "claude-cli": 200000,                    # CLI 기본 모델 (플래그 없음)
     "claude-opus-4-7": 200000,
+    "claude-opus-4-6": 200000,
     "claude-sonnet-4-6": 200000,
     "claude-haiku-4-5-20251001": 200000,
 }

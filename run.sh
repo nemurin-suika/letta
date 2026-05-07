@@ -75,16 +75,48 @@ if [ "$MODE" = "local" ]; then
     echo "[DB] 데이터베이스 마이그레이션 중..."
     uv run alembic upgrade head
 
-    # ── Redis 없음 → 단일 워커 모드 (NoopAsyncRedisClient 자동 사용) ────────
-    echo "[Redis] Redis 미사용 → 단일 워커 모드로 실행"
+    # ── Redis 시작 ──────────────────────────────────────────────────────────
+    REDIS_HOST="127.0.0.1"
+    REDIS_PORT="6379"
+    if ! command -v redis-server &>/dev/null; then
+        echo "[Redis] ERROR: redis-server를 찾을 수 없습니다. 'brew install redis' 로 설치하세요."
+        exit 1
+    fi
+    if redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" ping 2>/dev/null | grep -q "PONG"; then
+        echo "[Redis] 이미 실행 중 (${REDIS_HOST}:${REDIS_PORT})"
+    else
+        echo "[Redis] 시작 중..."
+        mkdir -p ~/.letta/logs
+        redis-server --daemonize yes \
+            --bind "$REDIS_HOST" \
+            --port "$REDIS_PORT" \
+            --logfile "${HOME}/.letta/logs/redis.log" \
+            --loglevel notice
+        # 준비될 때까지 대기 (최대 10초)
+        for _i in $(seq 1 20); do
+            redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" ping 2>/dev/null | grep -q "PONG" && break
+            sleep 0.5
+        done
+        redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" ping 2>/dev/null | grep -q "PONG" \
+            && echo "[Redis] 시작 완료" \
+            || { echo "[Redis] ERROR: 시작 실패. ~/.letta/logs/redis.log 확인"; exit 1; }
+    fi
+
+    # ── CPU 코어 수 자동 감지 → 워커 수 설정 ─────────────────────────────────
+    _CPU_CORES=$(python3 -c "import os; print(os.cpu_count() or 1)")
+    _WORKERS="${_CPU_CORES}"
+    echo "[Letta] CPU 코어 수: ${_CPU_CORES} → 워커 수: ${_WORKERS}"
 
     # ── Letta 서버 시작 ─────────────────────────────────────────────────────
     export GEMINI_API_KEY="$GEMINI_API_KEY"
     export GEMINI_API_KEYS="$GEMINI_API_KEYS"
     export LLM_FALLBACK_CONFIG="$LLM_FALLBACK_CONFIG"
     export LETTA_CLAUDE_CLI_DEBUG_DIR="${HOME}/.letta/logs/claude_cli_debug"
+    export LETTA_REDIS_HOST="$REDIS_HOST"
+    export LETTA_REDIS_PORT="$REDIS_PORT"
+    export LETTA_UVICORN_WORKERS="${_WORKERS}"
 
-    echo "[Letta] 로컬 서버 시작 (http://0.0.0.0:8283)..."
+    echo "[Letta] 로컬 서버 시작 (http://0.0.0.0:8283, workers=${_WORKERS}, redis=${REDIS_HOST}:${REDIS_PORT})..."
     exec uv run letta server --host 0.0.0.0 --port 8283
 
 # =============================================================================
