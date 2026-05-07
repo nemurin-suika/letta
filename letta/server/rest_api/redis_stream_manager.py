@@ -464,7 +464,7 @@ async def redis_sse_stream_generator(
     redis_client: AsyncRedisClient,
     run_id: str,
     starting_after: Optional[int] = None,
-    poll_interval: float = 0.1,
+    poll_interval: float = 0.01,
     batch_size: int = 100,
 ) -> AsyncIterator[str]:
     """

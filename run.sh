@@ -104,7 +104,7 @@ if [ "$MODE" = "local" ]; then
 
     # ── CPU 코어 수 자동 감지 → 워커 수 설정 ─────────────────────────────────
     _CPU_CORES=$(python3 -c "import os; print(os.cpu_count() or 1)")
-    _WORKERS="${_CPU_CORES}"
+    _WORKERS=$(python3 -c "print(max(1, int('${_CPU_CORES}') // 2))")
     echo "[Letta] CPU 코어 수: ${_CPU_CORES} → 워커 수: ${_WORKERS}"
 
     # ── Letta 서버 시작 ─────────────────────────────────────────────────────
