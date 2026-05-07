@@ -178,8 +178,10 @@ async def lifespan(app_: FastAPI):
     FastAPI lifespan context manager with setup before the app starts pre-yield and on shutdown after the yield.
     """
     worker_id = os.getpid()
+    from letta.log import reconfigure_for_worker
     from letta.monitoring.readiness_state import initialize_readiness_state, set_readiness_state
 
+    reconfigure_for_worker()
     initialize_readiness_state(reason="warming", source="lifespan_startup")
 
     # Initialize event loop watchdog

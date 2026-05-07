@@ -281,6 +281,35 @@ DEVELOPMENT_LOGGING = {
 dictConfig(DEVELOPMENT_LOGGING)
 
 
+def reconfigure_for_worker() -> None:
+    """워커 프로세스 시작 시 호출 — PID 기반 로그 파일로 재설정하고 콘솔 핸들러를 제거한다."""
+    import os
+    import logging.handlers as _lh
+
+    pid = os.getpid()
+    logfile = Path(settings.letta_dir / "logs" / f"letta-worker-{pid}.log")
+    logfile.parent.mkdir(parents=True, exist_ok=True)
+    logfile.touch(exist_ok=True)
+
+    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+
+    new_handler = _lh.RotatingFileHandler(
+        logfile,
+        maxBytes=1024 ** 2 * 10,
+        backupCount=3,
+        encoding="utf-8",
+    )
+    new_handler.setLevel(logging.DEBUG)
+    new_handler.setFormatter(formatter)
+
+    root = logging.getLogger()
+    for h in root.handlers[:]:
+        if isinstance(h, (logging.StreamHandler, _lh.RotatingFileHandler)):
+            root.removeHandler(h)
+            h.close()
+    root.addHandler(new_handler)
+
+
 def get_logger(name: Optional[str] = None) -> "logging.Logger":
     """returns the project logger, scoped to a child name if provided
     Args:

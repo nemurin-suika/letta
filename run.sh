@@ -116,8 +116,11 @@ if [ "$MODE" = "local" ]; then
     export LETTA_REDIS_PORT="$REDIS_PORT"
     export LETTA_UVICORN_WORKERS="${_WORKERS}"
 
+    LOG_DIR="${HOME}/.letta/logs"
+    mkdir -p "$LOG_DIR"
     echo "[Letta] 로컬 서버 시작 (http://0.0.0.0:8283, workers=${_WORKERS}, redis=${REDIS_HOST}:${REDIS_PORT})..."
-    exec uv run letta server --host 0.0.0.0 --port 8283
+    echo "[Letta] 워커 로그 경로: ${LOG_DIR}/letta-worker-<PID>.log"
+    exec uv run letta server --host 0.0.0.0 --port 8283 2>&1 | tee -a "${LOG_DIR}/main.log"
 
 # =============================================================================
 else
