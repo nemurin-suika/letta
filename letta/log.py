@@ -287,7 +287,8 @@ def reconfigure_for_worker() -> None:
     import logging.handlers as _lh
 
     pid = os.getpid()
-    logfile = Path(settings.letta_dir / "logs" / f"letta-worker-{pid}.log")
+    ts = os.environ.get("LETTA_START_TIME", datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S"))
+    logfile = Path(settings.letta_dir / "logs" / f"letta-worker-{ts}-{pid}.log")
     logfile.parent.mkdir(parents=True, exist_ok=True)
     logfile.touch(exist_ok=True)
 

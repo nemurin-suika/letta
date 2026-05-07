@@ -118,9 +118,11 @@ if [ "$MODE" = "local" ]; then
 
     LOG_DIR="${HOME}/.letta/logs"
     mkdir -p "$LOG_DIR"
+    _START_TIME=$(date +%Y%m%d_%H%M%S)
+    export LETTA_START_TIME="$_START_TIME"
     echo "[Letta] 로컬 서버 시작 (http://0.0.0.0:8283, workers=${_WORKERS}, redis=${REDIS_HOST}:${REDIS_PORT})..."
-    echo "[Letta] 워커 로그 경로: ${LOG_DIR}/letta-worker-<PID>.log"
-    exec uv run letta server --host 0.0.0.0 --port 8283 2>&1 | tee -a "${LOG_DIR}/main.log"
+    echo "[Letta] 워커 로그 경로: ${LOG_DIR}/letta-worker-${_START_TIME}-<PID>.log"
+    exec uv run letta server --host 0.0.0.0 --port 8283 2>&1 | tee -a "${LOG_DIR}/main-${_START_TIME}.log"
 
 # =============================================================================
 else
