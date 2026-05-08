@@ -4,6 +4,7 @@ Gemini rate limit 시 fallback으로 사용. API 키 없이 Claude CLI 구독을
 """
 
 import asyncio
+import glob
 import json
 import os
 import re
@@ -61,6 +62,7 @@ _ATTR_RE = re.compile(r'(\w+)=["\']?([^"\'>\s]*)["\']?')
 _YOUTUBE_RE = re.compile(r"\[유튜브 링크\](.*?)\[/유튜브 링크\]", re.DOTALL)
 _IMAGE_LINK_RE = re.compile(r"\[이미지 링크\](.*?)\[/이미지 링크\]", re.DOTALL)
 _WEB_LINK_RE = re.compile(r"\[웹 링크\](.*?)\[/웹 링크\]", re.DOTALL)
+_SCREENSHOT_RE = re.compile(r"\[스크린샷([^\]]*)\](.*?)\[/스크린샷\]", re.DOTALL)
 
 
 def _expand_youtube_links(text: str) -> str:
@@ -101,6 +103,27 @@ def _expand_web_links(text: str) -> str:
             f"[/채팅에 웹 링크 공유됨]"
         )
     return _WEB_LINK_RE.sub(replace, text)
+
+
+def _expand_screenshots(text: str) -> str:
+    """[스크린샷] 태그를 Read 지시문으로 변환. 파일이 없으면 '이전 스크린샷'으로 대체."""
+    def replace(m: re.Match) -> str:
+        attrs = m.group(1)
+        file_path = m.group(2).strip()
+        source_m = re.search(r"source=(\w+)", attrs)
+        source = source_m.group(1) if source_m else "screen"
+        label = "화면" if source == "screen" else "카메라"
+
+        if file_path and os.path.exists(file_path):
+            return (
+                f"[현재 {label} 스크린샷 첨부됨]\n"
+                f"Read 툴로 {file_path} 파일을 읽어 화면에 무엇이 보이는지 파악하세요.\n"
+                f"스크린샷 내용을 인식하고 자연스럽게 반응하세요.\n"
+                f"[/현재 {label} 스크린샷 첨부됨]"
+            )
+        return f"[이전 {label} 스크린샷 — 내용은 이미 처리됨]"
+
+    return _SCREENSHOT_RE.sub(replace, text)
 
 MEMORY_INSTRUCTIONS = """\
 
@@ -160,7 +183,12 @@ class ClaudeCLIClient(LLMClientBase):
         system: Optional[str] = None,
     ) -> dict:
         prompt = self._format_prompt(messages, system)
-        return {"prompt": prompt, "model": llm_config.model or ""}
+        # 프롬프트에서 스크린샷 temp 파일 경로 추출 (처리 후 클린업용)
+        screenshot_files = [
+            m.group(1)
+            for m in re.finditer(r"Read 툴로 (/tmp/claude_screenshot_[a-f0-9]+\.jpg) 파일을", prompt)
+        ]
+        return {"prompt": prompt, "model": llm_config.model or "", "screenshot_files": screenshot_files}
 
     # ---------------------------------------------------------------------------
     # Sync/async request
@@ -178,13 +206,18 @@ class ClaudeCLIClient(LLMClientBase):
 
         prompt = request_data["prompt"]
         model = request_data.get("model", "")
+        screenshot_files: list = request_data.get("screenshot_files", [])
 
-        # 프롬프트는 -p의 인자로 직접 전달 (stdin은 claude CLI가 지원하지 않음)
-        cmd = ["claude", "-p", prompt, "--output-format", "json", "--allowedTools", "WebFetch"]
+        # 스크린샷 파일이 있으면 Read 툴도 허용
+        allowed_tools = "WebFetch,Read(/tmp/claude_screenshot*)" if screenshot_files else "WebFetch"
+        cmd = ["claude", "-p", prompt, "--output-format", "json", "--allowedTools", allowed_tools]
         if model and model != "claude-cli":
             cmd.extend(["--model", model])
 
-        logger.info(f"[ClaudeCLI] 실행: claude -p <prompt({len(prompt)}chars)> --output-format json")
+        logger.info(
+            f"[ClaudeCLI] 실행: claude -p <prompt({len(prompt)}chars)> "
+            f"--output-format json (screenshots={len(screenshot_files)})"
+        )
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -198,6 +231,14 @@ class ClaudeCLIClient(LLMClientBase):
                 message=f"claude CLI 실행 실패: {e}",
                 code=ErrorCode.INTERNAL_SERVER_ERROR,
             )
+        finally:
+            # 처리 완료 후 스크린샷 temp 파일 삭제
+            for f in screenshot_files:
+                try:
+                    os.unlink(f)
+                    logger.debug(f"[ClaudeCLI] temp 파일 삭제: {f}")
+                except Exception:
+                    pass
 
         stdout_text = stdout.decode().strip()
         stderr_text = stderr.decode().strip()
@@ -468,6 +509,7 @@ class ClaudeCLIClient(LLMClientBase):
             tool_calls = self._get_field(msg, "tool_calls") or []
 
             if role == "user":
+                content = _expand_screenshots(content)
                 content = _expand_youtube_links(content)
                 content = _expand_image_links(content)
                 content = _expand_web_links(content)
@@ -519,16 +561,14 @@ class ClaudeCLIClient(LLMClientBase):
                     if isinstance(src, UrlImage):
                         texts.append(f"[이미지 링크]{src.url}[/이미지 링크]")
                     elif isinstance(src, Base64Image):
-                        texts.append(f"![image](data:{src.media_type};base64,{src.data})")
+                        pass  # letta_agent에서 [스크린샷] 태그로 텍스트에 이미 포함됨
                 elif isinstance(c, dict) and c.get("type") == "image":
                     src = c.get("source", {})
                     if isinstance(src, dict):
                         if src.get("type") == "url":
                             texts.append(f"[이미지 링크]{src.get('url', '')}[/이미지 링크]")
                         elif src.get("type") == "base64":
-                            media_type = src.get("media_type", "image/jpeg")
-                            data = src.get("data", "")
-                            texts.append(f"![image](data:{media_type};base64,{data})")
+                            pass  # letta_agent에서 [스크린샷] 태그로 텍스트에 이미 포함됨
             return "\n".join(texts)
 
         if isinstance(content, TextContent):
