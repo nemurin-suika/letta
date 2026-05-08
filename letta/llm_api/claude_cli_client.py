@@ -59,6 +59,8 @@ _ATTR_RE = re.compile(r'(\w+)=["\']?([^"\'>\s]*)["\']?')
 
 # [유튜브 링크]URL[/유튜브 링크] 패턴 — Open-LLM-VTuber에서 이미 영상 URL로 교체된 상태로 전달됨
 _YOUTUBE_RE = re.compile(r"\[유튜브 링크\](.*?)\[/유튜브 링크\]", re.DOTALL)
+_IMAGE_LINK_RE = re.compile(r"\[이미지 링크\](.*?)\[/이미지 링크\]", re.DOTALL)
+_WEB_LINK_RE = re.compile(r"\[웹 링크\](.*?)\[/웹 링크\]", re.DOTALL)
 
 
 def _expand_youtube_links(text: str) -> str:
@@ -73,6 +75,32 @@ def _expand_youtube_links(text: str) -> str:
             f"[/미즈키가 시청한 유튜브 영상]"
         )
     return _YOUTUBE_RE.sub(replace, text)
+
+
+def _expand_image_links(text: str) -> str:
+    """[이미지 링크]URL[/이미지 링크]를 WebFetch 이미지 감상 지시문으로 변환."""
+    def replace(m: re.Match) -> str:
+        url = m.group(1).strip()
+        return (
+            f"[채팅에 이미지 링크 공유됨]\n"
+            f"URL: {url}\n"
+            f"WebFetch로 위 이미지 URL을 방문해서 이미지를 직접 보고 자연스럽게 감상/반응을 남겨주세요.\n"
+            f"[/채팅에 이미지 링크 공유됨]"
+        )
+    return _IMAGE_LINK_RE.sub(replace, text)
+
+
+def _expand_web_links(text: str) -> str:
+    """[웹 링크]URL[/웹 링크]를 WebFetch 감상 지시문으로 변환."""
+    def replace(m: re.Match) -> str:
+        url = m.group(1).strip()
+        return (
+            f"[채팅에 웹 링크 공유됨]\n"
+            f"URL: {url}\n"
+            f"WebFetch로 위 URL을 방문해서 내용을 파악하고 자연스럽게 반응하세요.\n"
+            f"[/채팅에 웹 링크 공유됨]"
+        )
+    return _WEB_LINK_RE.sub(replace, text)
 
 MEMORY_INSTRUCTIONS = """\
 
@@ -441,6 +469,8 @@ class ClaudeCLIClient(LLMClientBase):
 
             if role == "user":
                 content = _expand_youtube_links(content)
+                content = _expand_image_links(content)
+                content = _expand_web_links(content)
                 parts.append(f"Human: {content}")
             elif role == "assistant":
                 if tool_calls:
@@ -468,7 +498,12 @@ class ClaudeCLIClient(LLMClientBase):
 
     @staticmethod
     def _get_content(msg) -> str:
-        from letta.schemas.letta_message_content import TextContent
+        from letta.schemas.letta_message_content import (
+            TextContent,
+            ImageContent,
+            UrlImage,
+            Base64Image,
+        )
 
         content = ClaudeCLIClient._get_field(msg, "content") or ""
 
@@ -479,7 +514,21 @@ class ClaudeCLIClient(LLMClientBase):
                     texts.append(c.text)
                 elif isinstance(c, dict) and c.get("type") == "text":
                     texts.append(c.get("text", ""))
-                # ImageContent 등 비텍스트 항목은 건너뜀
+                elif isinstance(c, ImageContent):
+                    src = c.source
+                    if isinstance(src, UrlImage):
+                        texts.append(f"[이미지 링크]{src.url}[/이미지 링크]")
+                    elif isinstance(src, Base64Image):
+                        texts.append(f"![image](data:{src.media_type};base64,{src.data})")
+                elif isinstance(c, dict) and c.get("type") == "image":
+                    src = c.get("source", {})
+                    if isinstance(src, dict):
+                        if src.get("type") == "url":
+                            texts.append(f"[이미지 링크]{src.get('url', '')}[/이미지 링크]")
+                        elif src.get("type") == "base64":
+                            media_type = src.get("media_type", "image/jpeg")
+                            data = src.get("data", "")
+                            texts.append(f"![image](data:{media_type};base64,{data})")
             return "\n".join(texts)
 
         if isinstance(content, TextContent):
