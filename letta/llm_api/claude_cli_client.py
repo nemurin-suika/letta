@@ -513,6 +513,9 @@ class ClaudeCLIClient(LLMClientBase):
                 content = _expand_youtube_links(content)
                 content = _expand_image_links(content)
                 content = _expand_web_links(content)
+                if not content.strip():
+                    logger.warning("[ClaudeCLI] 빈 user 메시지 건너뜀 — LLM 상상 입력 방지")
+                    continue
                 parts.append(f"Human: {content}")
             elif role == "assistant":
                 if tool_calls:
