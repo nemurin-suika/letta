@@ -528,6 +528,8 @@ class ClaudeCLIClient(LLMClientBase):
                     text = f"Assistant: {content}\n" + "\n".join(call_strs) if content else "Assistant: " + "\n".join(call_strs)
                     parts.append(text)
                 else:
+                    if not content.strip():
+                        continue
                     parts.append(f"Assistant: {content}")
             elif role == "tool":
                 parts.append(f"[Tool result]: {content}")
