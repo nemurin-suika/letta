@@ -112,16 +112,19 @@ def _expand_screenshots(text: str) -> str:
         file_path = m.group(2).strip()
         source_m = re.search(r"source=(\w+)", attrs)
         source = source_m.group(1) if source_m else "screen"
-        label = "화면" if source == "screen" else "카메라"
+        label = {"screen": "화면", "camera": "카메라", "youtube_frame": "유튜브 영상 프레임"}.get(source, "화면")
 
         if file_path and os.path.exists(file_path):
+            if source == "youtube_frame":
+                desc = "유튜브 영상의 특정 시점 프레임입니다. 영상 내용을 파악하는 데 활용하세요."
+            else:
+                desc = "화면에 무엇이 보이는지 파악하세요."
             return (
-                f"[현재 {label} 스크린샷 첨부됨]\n"
-                f"Read 툴로 {file_path} 파일을 읽어 화면에 무엇이 보이는지 파악하세요.\n"
-                f"스크린샷 내용을 인식하고 자연스럽게 반응하세요.\n"
-                f"[/현재 {label} 스크린샷 첨부됨]"
+                f"[현재 {label} 첨부됨]\n"
+                f"Read 툴로 {file_path} 파일을 읽어 {desc}\n"
+                f"[/현재 {label} 첨부됨]"
             )
-        return f"[이전 {label} 스크린샷 — 내용은 이미 처리됨]"
+        return f"[이전 {label} — 내용은 이미 처리됨]"
 
     return _SCREENSHOT_RE.sub(replace, text)
 
@@ -184,10 +187,9 @@ class ClaudeCLIClient(LLMClientBase):
     ) -> dict:
         prompt = self._format_prompt(messages, system)
         # 프롬프트에서 스크린샷 temp 파일 경로 추출 (처리 후 클린업용)
-        screenshot_files = [
-            m.group(1)
-            for m in re.finditer(r"Read 툴로 (/tmp/claude_screenshot_[a-f0-9]+\.jpg) 파일을", prompt)
-        ]
+        screenshot_files = re.findall(
+            r"Read 툴로 (/tmp/claude_(?:screenshot|yt_frame)_[a-f0-9_]+\.jpg) 파일을", prompt
+        )
         return {"prompt": prompt, "model": llm_config.model or "", "screenshot_files": screenshot_files}
 
     # ---------------------------------------------------------------------------
@@ -209,7 +211,7 @@ class ClaudeCLIClient(LLMClientBase):
         screenshot_files: list = request_data.get("screenshot_files", [])
 
         # 스크린샷 파일이 있으면 Read 툴도 허용
-        allowed_tools = "WebFetch,Read(/tmp/claude_screenshot*)" if screenshot_files else "WebFetch"
+        allowed_tools = "WebFetch,Read(/tmp/claude_screenshot*),Read(/tmp/claude_yt_frame*)" if screenshot_files else "WebFetch"
         cmd = ["claude", "-p", prompt, "--output-format", "json", "--allowedTools", allowed_tools]
         if model and model != "claude-cli":
             cmd.extend(["--model", model])
