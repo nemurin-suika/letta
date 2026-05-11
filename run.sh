@@ -9,7 +9,7 @@ GEMINI_API_KEYS="$(IFS=,; echo "${GEMINI_KEYS[*]}")"
 LLM_FALLBACK_CONFIG='{"model": "claude-cli", "model_endpoint_type": "claude_cli", "context_window": 72000}'
 
 PG_BIN="/opt/homebrew/opt/postgresql@17/bin"
-PG_DATA="/opt/homebrew/var/postgresql@17"
+PG_DATA="$HOME/OneDrive/ai/memory/pgdata"
 PG_USER="postgres"
 PG_PASSWORD="postgres"
 PG_DB="postgres"
@@ -107,15 +107,19 @@ if [ "$MODE" = "local" ]; then
     echo "[Letta] 워커 수: ${_WORKERS}"
 
     # ── Letta 서버 시작 ─────────────────────────────────────────────────────
+    export LETTA_DIR="${HOME}/OneDrive/ai/memory/letta"
+    mkdir -p "$LETTA_DIR"
     export GEMINI_API_KEY="$GEMINI_API_KEY"
     export GEMINI_API_KEYS="$GEMINI_API_KEYS"
     export LLM_FALLBACK_CONFIG="$LLM_FALLBACK_CONFIG"
+    # 로그는 OneDrive 제외 — 로컬에만 유지
+    LOG_DIR="${HOME}/.letta/logs"
+    export LETTA_WORKER_LOG_DIR="${HOME}/.letta/logs"
     export LETTA_CLAUDE_CLI_DEBUG_DIR="${HOME}/.letta/logs/claude_cli_debug"
     export LETTA_REDIS_HOST="$REDIS_HOST"
     export LETTA_REDIS_PORT="$REDIS_PORT"
     export LETTA_UVICORN_WORKERS="${_WORKERS}"
 
-    LOG_DIR="${HOME}/.letta/logs"
     mkdir -p "$LOG_DIR"
     _START_TIME=$(date +%Y%m%d_%H%M%S)
     export LETTA_START_TIME="$_START_TIME"

@@ -288,7 +288,10 @@ def reconfigure_for_worker() -> None:
 
     pid = os.getpid()
     ts = os.environ.get("LETTA_START_TIME", datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S"))
-    logfile = Path(settings.letta_dir / "logs" / f"letta-worker-{ts}-{pid}.log")
+    # LETTA_WORKER_LOG_DIR가 설정되면 해당 경로에 로그 저장 (LETTA_DIR과 분리)
+    worker_log_dir = os.environ.get("LETTA_WORKER_LOG_DIR")
+    log_dir = Path(worker_log_dir) if worker_log_dir else settings.letta_dir / "logs"
+    logfile = log_dir / f"letta-worker-{ts}-{pid}.log"
     logfile.parent.mkdir(parents=True, exist_ok=True)
     logfile.touch(exist_ok=True)
 

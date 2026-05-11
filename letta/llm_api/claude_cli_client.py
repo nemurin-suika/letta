@@ -218,6 +218,7 @@ class ClaudeCLIClient(LLMClientBase):
             f"[ClaudeCLI] 실행: claude -p <prompt({len(prompt)}chars)> "
             f"--output-format json (screenshots={len(screenshot_files)})"
         )
+        TIMEOUT_SECONDS = 300  # 5분
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -225,7 +226,16 @@ class ClaudeCLIClient(LLMClientBase):
                 stderr=asyncio.subprocess.PIPE,
                 cwd="/tmp",  # 프로젝트 CLAUDE.md 컨텍스트 격리
             )
-            stdout, stderr = await proc.communicate()
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=TIMEOUT_SECONDS)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.communicate()  # 버퍼 정리
+                logger.error(f"[ClaudeCLI] {TIMEOUT_SECONDS}초 타임아웃 — 프로세스 강제 종료")
+                raise LLMServerError(
+                    message=f"claude CLI 타임아웃: {TIMEOUT_SECONDS}초 초과",
+                    code=ErrorCode.INTERNAL_SERVER_ERROR,
+                )
         except OSError as e:
             raise LLMConnectionError(
                 message=f"claude CLI 실행 실패: {e}",
@@ -324,6 +334,9 @@ class ClaudeCLIClient(LLMClientBase):
         )
         completion_tokens = int(usage_raw.get("output_tokens", 0))
 
+        # 환각 H:/A: 대화 잘라내기 (LLM이 미래 입력을 상상해서 생성하는 패턴 차단)
+        text = self._strip_hallucinated_conversation(text)
+
         # 응답에서 core memory 태그 파싱 및 제거
         clean_text, tool_calls = self._extract_memory_ops(text)
 
@@ -351,6 +364,25 @@ class ClaudeCLIClient(LLMClientBase):
                 total_tokens=prompt_tokens + completion_tokens,
             ),
         )
+
+    @staticmethod
+    def _strip_hallucinated_conversation(text: str) -> str:
+        """LLM이 응답 안에 상상으로 생성한 H: / A: 대화 형식을 잘라냄.
+
+        LLM이 학습 데이터 패턴을 바탕으로 아직 오지 않은 시청자 채팅 등
+        미래 입력을 'H: [채팅] ...', 'A: ...' 형식으로 스스로 만들어내는
+        환각이 발생한다. 'H: [' 패턴이 나타나는 지점에서 응답을 잘라낸다.
+        """
+        import re as _re
+        m = _re.search(r'\nH: \[', text)
+        if m:
+            stripped = text[:m.start()].rstrip()
+            logger.warning(
+                f"[ClaudeCLI] 환각 H:/A: 대화 감지 — 응답 {len(text)}자 중 "
+                f"{len(text) - m.start()}자 잘라냄. 미리보기: {repr(text[m.start():m.start()+80])}"
+            )
+            return stripped
+        return text
 
     @staticmethod
     def _extract_memory_ops(text: str) -> Tuple[str, List[ToolCall]]:
