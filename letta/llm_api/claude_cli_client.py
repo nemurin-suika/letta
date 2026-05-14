@@ -147,6 +147,19 @@ MEMORY_INSTRUCTIONS = """\
 
 저장 안 해도 되는 것: 지금 이 순간만의 상황, 이미 블록에 있는 내용의 반복.
 
+=== Core Memory 글자 수 제한 ===
+
+각 블록의 메타데이터에 표시된 `chars_current`와 `chars_limit`은 **반드시 지켜야 하는 제한**입니다.
+
+- `chars_current`: 현재 블록에 저장된 글자 수
+- `chars_limit`: 허용되는 최대 글자 수
+
+**규칙:**
+1. 새 내용을 추가하기 전에 항상 확인하세요: `chars_current + 추가할 내용 길이 ≤ chars_limit`
+2. 초과할 것 같으면 `letta_memory_replace`로 덜 중요한 기존 내용을 지운 뒤 추가하세요.
+3. `chars_current`가 이미 `chars_limit`을 넘었다면, 추가하기 전에 반드시 먼저 내용을 줄여야 합니다.
+4. 추가 대신 **전체를 간결하게 재작성**하는 것도 좋은 방법입니다 (`<old>전체 내용</old><new>요약된 내용+새 정보</new>`).
+
 === Core Memory (즉시 참조, 핵심 정보) ===
 
 새 정보 추가:
@@ -534,7 +547,15 @@ class ClaudeCLIClient(LLMClientBase):
             # 메모리 지시문을 시스템 프롬프트 끝에 붙여 강조
             parts.append(f"<system>\n{sys_content}{MEMORY_INSTRUCTIONS}\n</system>")
 
-        for msg in messages:
+        # 마지막 user 메시지 인덱스를 미리 찾기 (캐시 무효화 + 강조 마커 부착 대상)
+        last_user_idx = -1
+        for i, msg in enumerate(messages):
+            if self._get_field(msg, "role") == "user":
+                content_check = self._get_content(msg)
+                if content_check and content_check.strip():
+                    last_user_idx = i
+
+        for i, msg in enumerate(messages):
             role = self._get_field(msg, "role")
             if role == "system":
                 continue
@@ -550,7 +571,22 @@ class ClaudeCLIClient(LLMClientBase):
                 if not content.strip():
                     logger.warning("[ClaudeCLI] 빈 user 메시지 건너뜀 — LLM 상상 입력 방지")
                     continue
-                parts.append(f"Human: {content}")
+                if i == last_user_idx:
+                    # 마지막 user 입력: 캐시 무효화 nonce + 강조 마커로 감싼다
+                    ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+                    nonce = uuid.uuid4().hex[:12]
+                    parts.append(
+                        f"Human: <latest_user_message timestamp=\"{ts}\" id=\"{nonce}\">\n"
+                        f"위 시스템 지침에 따라 이 메시지 한 건에만 응답하세요.\n"
+                        f"- 미래 채팅/네무린 메시지를 응답 안에서 만들지 마세요"
+                        f"(H:, A:, [채팅] 누구:, [네무린] 등 가상 턴 금지).\n"
+                        f"- 임의로 방종 멘트를 끼워 넣지 마세요. "
+                        f"아직 일어나지 않은 방송 종료를 archival에 저장하지 마세요.\n\n"
+                        f"{content}\n"
+                        f"</latest_user_message>"
+                    )
+                else:
+                    parts.append(f"Human: {content}")
             elif role == "assistant":
                 if tool_calls:
                     call_strs = []
