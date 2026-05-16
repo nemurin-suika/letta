@@ -23,8 +23,10 @@ LETTA_TOKEN = "test_server_token"
 
 MAX_BATCH_CHARS = 80_000
 
-HUMAN_TOTAL_LIMIT = 250
-PERSONA_TOTAL_LIMIT = 1000
+HUMAN_TOTAL_LIMIT = 500
+PERSONA_TOTAL_LIMIT = 500
+PER_BATCH_HUMAN_LIMIT = 50
+PER_BATCH_PERSONA_LIMIT = 50
 
 REBUILD_PROMPT = """\
 당신은 아래 시스템 프롬프트로 정의된 AI 에이전트입니다:
@@ -67,6 +69,35 @@ REBUILD_PROMPT = """\
 
 대화 기록:
 {transcript}"""
+
+SUMMARIZE_PROMPT = """\
+당신은 아래 시스템 프롬프트로 정의된 AI 에이전트입니다:
+
+<system_prompt>
+{system_prompt}
+</system_prompt>
+
+아래는 여러 대화 구간에서 추출한 핵심 메모 조각들입니다.
+이것을 바탕으로 core memory 블록을 최종 정리해주세요.
+
+**archival memory(장기 저장소)가 별도로 존재**하므로, core memory에는 검색 없이 즉시 참조해야 할 것만 남기세요:
+- 매 대화의 전제가 되는 핵심 사실 (성별, 직업, 관계 등)
+- 잊으면 실례가 되는 정보
+- 자신의 정체성·말투·행동 패턴에 영향을 주는 경험
+
+글자 수 제한 (반드시 준수):
+- human 블록: 최대 {human_limit}자
+- persona 블록: 최대 {persona_limit}자
+
+중복 제거, 덜 중요한 것 생략하여 제한 안에 맞추세요. 아래 구분자를 정확히 지켜서 출력하세요:
+
+===HUMAN===
+(human 블록 내용)
+===PERSONA===
+(persona 블록 내용)
+
+추출된 메모:
+{memos}"""
 
 
 def get_all_agents() -> list:
@@ -242,24 +273,23 @@ def rebuild_agent(agent: dict, dry_run: bool) -> None:
     batches = split_into_batches(lines, MAX_BATCH_CHARS)
     total_chars = sum(len(b) for b in batches)
     n = len(batches)
-    human_per_batch = HUMAN_TOTAL_LIMIT // n
-    persona_per_batch = PERSONA_TOTAL_LIMIT // n
     print(f"트랜스크립트: {total_chars:,}자 → {n}개 배치")
-    print(f"배치당 한도: human {human_per_batch}자 / persona {persona_per_batch}자")
+    print(f"배치당 한도: human {PER_BATCH_HUMAN_LIMIT}자 / persona {PER_BATCH_PERSONA_LIMIT}자")
 
+    # 1단계: 배치별 메모 추출 (배치당 고정 소량)
     all_human: list[str] = []
     all_persona: list[str] = []
 
     for i, batch_text in enumerate(batches, 1):
-        print(f"  [배치 {i}/{n}] {len(batch_text):,}자 분석 중...")
+        print(f"  [1단계 배치 {i}/{n}] {len(batch_text):,}자 분석 중...")
         try:
             result = ask_claude(REBUILD_PROMPT.format(
                 system_prompt=system_prompt,
                 transcript=batch_text,
                 batch_index=i,
                 batch_total=n,
-                human_limit=human_per_batch,
-                persona_limit=persona_per_batch,
+                human_limit=PER_BATCH_HUMAN_LIMIT,
+                persona_limit=PER_BATCH_PERSONA_LIMIT,
             ))
         except RuntimeError as e:
             print(f"    오류: {e}")
@@ -270,9 +300,28 @@ def rebuild_agent(agent: dict, dry_run: bool) -> None:
         if persona_val:
             all_persona.append(persona_val)
 
-    # 합산 후 전체 한도 초과 시 잘라냄 (안전장치)
-    human_value = "\n\n".join(all_human)[:HUMAN_TOTAL_LIMIT]
-    persona_value = "\n\n".join(all_persona)[:PERSONA_TOTAL_LIMIT]
+    raw_memos = f"[human 메모]\n" + "\n".join(f"- {h}" for h in all_human)
+    raw_memos += f"\n\n[persona 메모]\n" + "\n".join(f"- {p}" for p in all_persona)
+    print(f"\n1단계 완료: human {len(all_human)}개 / persona {len(all_persona)}개 메모 수집")
+
+    # 2단계: 전체 메모를 재요약해서 최종 블록 작성
+    print(f"2단계: 전체 메모 재요약 중 (human {HUMAN_TOTAL_LIMIT}자 / persona {PERSONA_TOTAL_LIMIT}자)...")
+    try:
+        summary = ask_claude(SUMMARIZE_PROMPT.format(
+            system_prompt=system_prompt,
+            human_limit=HUMAN_TOTAL_LIMIT,
+            persona_limit=PERSONA_TOTAL_LIMIT,
+            memos=raw_memos,
+        ))
+    except RuntimeError as e:
+        print(f"  2단계 오류: {e}")
+        # 2단계 실패 시 단순 합산으로 fallback
+        summary = f"===HUMAN===\n{chr(10).join(all_human)}\n===PERSONA===\n{chr(10).join(all_persona)}"
+
+    human_value, persona_value = parse_blocks(summary)
+    # 안전장치: 초과 시 잘라냄
+    human_value = human_value[:HUMAN_TOTAL_LIMIT]
+    persona_value = persona_value[:PERSONA_TOTAL_LIMIT]
 
     print(f"\n[human] {len(human_value)}자\n{human_value}\n")
     print(f"[persona] {len(persona_value)}자\n{persona_value}\n")

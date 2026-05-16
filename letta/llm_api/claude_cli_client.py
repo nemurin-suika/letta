@@ -382,18 +382,24 @@ class ClaudeCLIClient(LLMClientBase):
 
     @staticmethod
     def _strip_hallucinated_conversation(text: str) -> str:
-        """LLM이 응답 안에 상상으로 생성한 H: / A: 대화 형식을 잘라냄.
+        """LLM이 응답 안에 상상으로 생성한 H: / A: / Human:/Assistant: 가상 대화 턴을 잘라냄.
 
-        LLM이 학습 데이터 패턴을 바탕으로 아직 오지 않은 시청자 채팅 등
-        미래 입력을 'H: [채팅] ...', 'A: ...' 형식으로 스스로 만들어내는
-        환각이 발생한다. 'H: [' 패턴이 나타나는 지점에서 응답을 잘라낸다.
+        LLM이 학습 데이터 패턴 또는 우리 자신의 <latest_user_message> 포맷을 모방해
+        아직 오지 않은 시청자 채팅·네무린 메시지를 'H: ...', 'A: ...' 형식으로
+        스스로 만들어내는 환각이 발생한다. 가상 턴 시작 지점에서 응답을 잘라낸다.
+
+        탐지 패턴:
+        - 'H: [' / 'A: [' (대괄호로 시작하는 메타 태그)
+        - 'H: <' / 'A: <' (꺾쇠 태그, 우리 wrapper 모방)
+        - 'Human: ' / 'Assistant: ' (전체 표기)
         """
         import re as _re
-        m = _re.search(r'\nH: \[', text)
+        # 줄바꿈 직후 H/A/Human/Assistant 턴 헤더가 나오는 첫 지점
+        m = _re.search(r'\n+(?:H|A|Human|Assistant): [\[<]', text)
         if m:
             stripped = text[:m.start()].rstrip()
             logger.warning(
-                f"[ClaudeCLI] 환각 H:/A: 대화 감지 — 응답 {len(text)}자 중 "
+                f"[ClaudeCLI] 환각 가상 턴 감지 — 응답 {len(text)}자 중 "
                 f"{len(text) - m.start()}자 잘라냄. 미리보기: {repr(text[m.start():m.start()+80])}"
             )
             return stripped
@@ -535,6 +541,13 @@ class ClaudeCLIClient(LLMClientBase):
         """Letta 메시지를 claude -p에 전달할 텍스트 프롬프트로 변환."""
         parts: List[str] = []
 
+        # 프롬프트 prefix에 매번 다른 nonce를 박아 Anthropic prompt cache 전체 무효화.
+        # 캐시된 컨텍스트가 LLM 환각의 토양이 되는 문제를 막기 위함.
+        # 비용은 약 10배 (cache_read 0.1x → input_tokens 1.0x).
+        prompt_nonce = uuid.uuid4().hex
+        prompt_ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+        parts.append(f"<prompt_invocation id=\"{prompt_nonce}\" t=\"{prompt_ts}\"/>")
+
         # 시스템 프롬프트 추출
         sys_content = system or ""
         for msg in messages:
@@ -547,15 +560,7 @@ class ClaudeCLIClient(LLMClientBase):
             # 메모리 지시문을 시스템 프롬프트 끝에 붙여 강조
             parts.append(f"<system>\n{sys_content}{MEMORY_INSTRUCTIONS}\n</system>")
 
-        # 마지막 user 메시지 인덱스를 미리 찾기 (캐시 무효화 + 강조 마커 부착 대상)
-        last_user_idx = -1
-        for i, msg in enumerate(messages):
-            if self._get_field(msg, "role") == "user":
-                content_check = self._get_content(msg)
-                if content_check and content_check.strip():
-                    last_user_idx = i
-
-        for i, msg in enumerate(messages):
+        for msg in messages:
             role = self._get_field(msg, "role")
             if role == "system":
                 continue
@@ -571,22 +576,7 @@ class ClaudeCLIClient(LLMClientBase):
                 if not content.strip():
                     logger.warning("[ClaudeCLI] 빈 user 메시지 건너뜀 — LLM 상상 입력 방지")
                     continue
-                if i == last_user_idx:
-                    # 마지막 user 입력: 캐시 무효화 nonce + 강조 마커로 감싼다
-                    ts = time.strftime("%Y-%m-%dT%H:%M:%S")
-                    nonce = uuid.uuid4().hex[:12]
-                    parts.append(
-                        f"Human: <latest_user_message timestamp=\"{ts}\" id=\"{nonce}\">\n"
-                        f"위 시스템 지침에 따라 이 메시지 한 건에만 응답하세요.\n"
-                        f"- 미래 채팅/네무린 메시지를 응답 안에서 만들지 마세요"
-                        f"(H:, A:, [채팅] 누구:, [네무린] 등 가상 턴 금지).\n"
-                        f"- 임의로 방종 멘트를 끼워 넣지 마세요. "
-                        f"아직 일어나지 않은 방송 종료를 archival에 저장하지 마세요.\n\n"
-                        f"{content}\n"
-                        f"</latest_user_message>"
-                    )
-                else:
-                    parts.append(f"Human: {content}")
+                parts.append(f"Human: {content}")
             elif role == "assistant":
                 if tool_calls:
                     call_strs = []
