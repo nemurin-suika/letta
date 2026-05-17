@@ -541,12 +541,11 @@ class ClaudeCLIClient(LLMClientBase):
         """Letta 메시지를 claude -p에 전달할 텍스트 프롬프트로 변환."""
         parts: List[str] = []
 
-        # 프롬프트 prefix에 매번 다른 nonce를 박아 Anthropic prompt cache 전체 무효화.
+        # 매 호출마다 다른 nonce. Anthropic prompt cache 전체 무효화 목적.
         # 캐시된 컨텍스트가 LLM 환각의 토양이 되는 문제를 막기 위함.
         # 비용은 약 10배 (cache_read 0.1x → input_tokens 1.0x).
         prompt_nonce = uuid.uuid4().hex
         prompt_ts = time.strftime("%Y-%m-%dT%H:%M:%S")
-        parts.append(f"<prompt_invocation id=\"{prompt_nonce}\" t=\"{prompt_ts}\"/>")
 
         # 시스템 프롬프트 추출
         sys_content = system or ""
@@ -557,8 +556,19 @@ class ClaudeCLIClient(LLMClientBase):
                 break
 
         if sys_content:
-            # 메모리 지시문을 시스템 프롬프트 끝에 붙여 강조
-            parts.append(f"<system>\n{sys_content}{MEMORY_INSTRUCTIONS}\n</system>")
+            # nonce를 system 내부 맨 앞에 박아 system message 캐시 키도 매번 변경.
+            # 메모리 지시문은 시스템 프롬프트 끝에 붙여 강조.
+            parts.append(
+                f"<system>\n"
+                f"[invocation_id: {prompt_nonce} | t: {prompt_ts}]\n\n"
+                f"{sys_content}{MEMORY_INSTRUCTIONS}\n"
+                f"</system>"
+            )
+
+        # 각 turn에도 짧은 nonce를 박아 per-message 캐시도 무효화.
+        # system 블록의 invocation_id만으로 안 잡히는 turn별 캐시 대응.
+        def _turn_nonce() -> str:
+            return uuid.uuid4().hex[:8]
 
         for msg in messages:
             role = self._get_field(msg, "role")
@@ -576,7 +586,7 @@ class ClaudeCLIClient(LLMClientBase):
                 if not content.strip():
                     logger.warning("[ClaudeCLI] 빈 user 메시지 건너뜀 — LLM 상상 입력 방지")
                     continue
-                parts.append(f"Human: {content}")
+                parts.append(f"Human: [t:{_turn_nonce()}] {content}")
             elif role == "assistant":
                 if tool_calls:
                     call_strs = []
@@ -585,14 +595,15 @@ class ClaudeCLIClient(LLMClientBase):
                         name = self._get_field(fn, "name") or ""
                         args = self._get_field(fn, "arguments") or ""
                         call_strs.append(f"[Tool call: {name}({args})]")
-                    text = f"Assistant: {content}\n" + "\n".join(call_strs) if content else "Assistant: " + "\n".join(call_strs)
+                    prefix = f"Assistant: [t:{_turn_nonce()}]"
+                    text = f"{prefix} {content}\n" + "\n".join(call_strs) if content else f"{prefix} " + "\n".join(call_strs)
                     parts.append(text)
                 else:
                     if not content.strip():
                         continue
-                    parts.append(f"Assistant: {content}")
+                    parts.append(f"Assistant: [t:{_turn_nonce()}] {content}")
             elif role == "tool":
-                parts.append(f"[Tool result]: {content}")
+                parts.append(f"[Tool result] [t:{_turn_nonce()}]: {content}")
 
         return "\n\n".join(parts)
 
