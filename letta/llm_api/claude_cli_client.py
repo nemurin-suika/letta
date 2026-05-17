@@ -198,12 +198,17 @@ class ClaudeCLIClient(LLMClientBase):
         tool_return_truncation_chars: Optional[int] = None,
         system: Optional[str] = None,
     ) -> dict:
-        prompt = self._format_prompt(messages, system)
-        # 프롬프트에서 스크린샷 temp 파일 경로 추출 (처리 후 클린업용)
+        system_prompt, user_content = self._format_request(messages, system)
+        combined_for_scan = system_prompt + "\n" + user_content
         screenshot_files = re.findall(
-            r"Read 툴로 (/tmp/claude_(?:screenshot|yt_frame)_[a-f0-9_]+\.jpg) 파일을", prompt
+            r"Read 툴로 (/tmp/claude_(?:screenshot|yt_frame)_[a-f0-9_]+\.jpg) 파일을", combined_for_scan
         )
-        return {"prompt": prompt, "model": llm_config.model or "", "screenshot_files": screenshot_files}
+        return {
+            "system_prompt": system_prompt,
+            "user_content": user_content,
+            "model": llm_config.model or "",
+            "screenshot_files": screenshot_files,
+        }
 
     # ---------------------------------------------------------------------------
     # Sync/async request
@@ -219,18 +224,25 @@ class ClaudeCLIClient(LLMClientBase):
                 code=ErrorCode.INTERNAL_SERVER_ERROR,
             )
 
-        prompt = request_data["prompt"]
+        system_prompt = request_data["system_prompt"]
+        user_content = request_data["user_content"]
         model = request_data.get("model", "")
         screenshot_files: list = request_data.get("screenshot_files", [])
 
         # 스크린샷 파일이 있으면 Read 툴도 허용
         allowed_tools = "WebFetch,Read(/tmp/claude_screenshot*),Read(/tmp/claude_yt_frame*)" if screenshot_files else "WebFetch"
-        cmd = ["claude", "-p", prompt, "--output-format", "json", "--allowedTools", allowed_tools]
+        cmd = [
+            "claude", "-p", user_content,
+            "--system-prompt", system_prompt,
+            "--output-format", "json",
+            "--allowedTools", allowed_tools,
+        ]
         if model and model != "claude-cli":
             cmd.extend(["--model", model])
 
         logger.info(
-            f"[ClaudeCLI] 실행: claude -p <prompt({len(prompt)}chars)> "
+            f"[ClaudeCLI] 실행: claude -p <user({len(user_content)}chars)> "
+            f"--system-prompt <sys({len(system_prompt)}chars)> "
             f"--output-format json (screenshots={len(screenshot_files)})"
         )
         TIMEOUT_SECONDS = 300  # 5분
@@ -268,7 +280,8 @@ class ClaudeCLIClient(LLMClientBase):
         stdout_text = stdout.decode().strip()
         stderr_text = stderr.decode().strip()
 
-        self._dump_debug_log(prompt, stdout_text, stderr_text, proc.returncode)
+        debug_prompt = f"=== SYSTEM_PROMPT ===\n{system_prompt}\n\n=== USER_CONTENT ===\n{user_content}"
+        self._dump_debug_log(debug_prompt, stdout_text, stderr_text, proc.returncode)
 
         if proc.returncode != 0:
             # JSON 응답이 있으면 result 필드에서 실제 오류 메시지 추출
@@ -349,9 +362,6 @@ class ClaudeCLIClient(LLMClientBase):
         )
         completion_tokens = int(usage_raw.get("output_tokens", 0))
 
-        # 환각 H:/A: 대화 잘라내기 (LLM이 미래 입력을 상상해서 생성하는 패턴 차단)
-        text = self._strip_hallucinated_conversation(text)
-
         # 응답에서 core memory 태그 파싱 및 제거
         clean_text, tool_calls = self._extract_memory_ops(text)
 
@@ -379,31 +389,6 @@ class ClaudeCLIClient(LLMClientBase):
                 total_tokens=prompt_tokens + completion_tokens,
             ),
         )
-
-    @staticmethod
-    def _strip_hallucinated_conversation(text: str) -> str:
-        """LLM이 응답 안에 상상으로 생성한 H: / A: / Human:/Assistant: 가상 대화 턴을 잘라냄.
-
-        LLM이 학습 데이터 패턴 또는 우리 자신의 <latest_user_message> 포맷을 모방해
-        아직 오지 않은 시청자 채팅·네무린 메시지를 'H: ...', 'A: ...' 형식으로
-        스스로 만들어내는 환각이 발생한다. 가상 턴 시작 지점에서 응답을 잘라낸다.
-
-        탐지 패턴:
-        - 'H: [' / 'A: [' (대괄호로 시작하는 메타 태그)
-        - 'H: <' / 'A: <' (꺾쇠 태그, 우리 wrapper 모방)
-        - 'Human: ' / 'Assistant: ' (전체 표기)
-        """
-        import re as _re
-        # 줄바꿈 직후 H/A/Human/Assistant 턴 헤더가 나오는 첫 지점
-        m = _re.search(r'\n+(?:H|A|Human|Assistant): [\[<]', text)
-        if m:
-            stripped = text[:m.start()].rstrip()
-            logger.warning(
-                f"[ClaudeCLI] 환각 가상 턴 감지 — 응답 {len(text)}자 중 "
-                f"{len(text) - m.start()}자 잘라냄. 미리보기: {repr(text[m.start():m.start()+80])}"
-            )
-            return stripped
-        return text
 
     @staticmethod
     def _extract_memory_ops(text: str) -> Tuple[str, List[ToolCall]]:
@@ -537,16 +522,16 @@ class ClaudeCLIClient(LLMClientBase):
     # Message formatting
     # ---------------------------------------------------------------------------
 
-    def _format_prompt(self, messages: List[Message], system: Optional[str] = None) -> str:
-        """Letta 메시지를 claude -p에 전달할 텍스트 프롬프트로 변환."""
-        parts: List[str] = []
+    def _format_request(
+        self, messages: List[Message], system: Optional[str] = None
+    ) -> Tuple[str, str]:
+        """Letta 메시지를 (system_prompt, user_content) 튜플로 변환.
 
-        # 매 호출마다 다른 nonce. Anthropic prompt cache 전체 무효화 목적.
-        # 캐시된 컨텍스트가 LLM 환각의 토양이 되는 문제를 막기 위함.
-        # 비용은 약 10배 (cache_read 0.1x → input_tokens 1.0x).
-        prompt_nonce = uuid.uuid4().hex
-        prompt_ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+        system_prompt: --system-prompt 인자로 전달될 시스템 텍스트
+        user_content: -p 인자로 전달될 사용자 메시지 (대화 히스토리 + 현재 입력 포함, XML 태그 구조)
 
+        H:/A: transcript 패턴을 쓰지 않아 LLM의 환각 대화 생성 경향을 줄임.
+        """
         # 시스템 프롬프트 추출
         sys_content = system or ""
         for msg in messages:
@@ -555,38 +540,40 @@ class ClaudeCLIClient(LLMClientBase):
                 sys_content = self._get_content(msg) or sys_content
                 break
 
-        if sys_content:
-            # nonce를 system 내부 맨 앞에 박아 system message 캐시 키도 매번 변경.
-            # 메모리 지시문은 시스템 프롬프트 끝에 붙여 강조.
-            parts.append(
-                f"<system>\n"
-                f"[invocation_id: {prompt_nonce} | t: {prompt_ts}]\n\n"
-                f"{sys_content}{MEMORY_INSTRUCTIONS}\n"
-                f"</system>"
-            )
+        system_prompt = f"{sys_content}{MEMORY_INSTRUCTIONS}" if sys_content else ""
 
-        # 각 turn에도 짧은 nonce를 박아 per-message 캐시도 무효화.
-        # system 블록의 invocation_id만으로 안 잡히는 turn별 캐시 대응.
-        def _turn_nonce() -> str:
-            return uuid.uuid4().hex[:8]
-
+        # 시스템 외 메시지를 history와 current_input으로 분리
+        non_system: List[Tuple[str, str, list]] = []
         for msg in messages:
             role = self._get_field(msg, "role")
             if role == "system":
                 continue
-
             content = self._get_content(msg)
             tool_calls = self._get_field(msg, "tool_calls") or []
-
             if role == "user":
                 content = _expand_screenshots(content)
                 content = _expand_youtube_links(content)
                 content = _expand_image_links(content)
                 content = _expand_web_links(content)
+            non_system.append((role, content, tool_calls))
+
+        # 마지막 user 메시지를 current_input으로 분리
+        last_user_idx = -1
+        for i in range(len(non_system) - 1, -1, -1):
+            if non_system[i][0] == "user" and non_system[i][1].strip():
+                last_user_idx = i
+                break
+
+        history_msgs = non_system[:last_user_idx] if last_user_idx >= 0 else non_system
+        current_msg = non_system[last_user_idx] if last_user_idx >= 0 else None
+
+        # history 직렬화 — XML 태그로 감싸서 transcript 패턴 회피
+        history_parts: List[str] = []
+        for role, content, tool_calls in history_msgs:
+            if role == "user":
                 if not content.strip():
-                    logger.warning("[ClaudeCLI] 빈 user 메시지 건너뜀 — LLM 상상 입력 방지")
                     continue
-                parts.append(f"Human: [t:{_turn_nonce()}] {content}")
+                history_parts.append(f"<user_message>\n{content}\n</user_message>")
             elif role == "assistant":
                 if tool_calls:
                     call_strs = []
@@ -594,18 +581,27 @@ class ClaudeCLIClient(LLMClientBase):
                         fn = self._get_field(tc, "function") or {}
                         name = self._get_field(fn, "name") or ""
                         args = self._get_field(fn, "arguments") or ""
-                        call_strs.append(f"[Tool call: {name}({args})]")
-                    prefix = f"Assistant: [t:{_turn_nonce()}]"
-                    text = f"{prefix} {content}\n" + "\n".join(call_strs) if content else f"{prefix} " + "\n".join(call_strs)
-                    parts.append(text)
+                        call_strs.append(f"<tool_call name=\"{name}\">{args}</tool_call>")
+                    body = (content + "\n" if content else "") + "\n".join(call_strs)
+                    history_parts.append(f"<assistant_message>\n{body}\n</assistant_message>")
                 else:
                     if not content.strip():
                         continue
-                    parts.append(f"Assistant: [t:{_turn_nonce()}] {content}")
+                    history_parts.append(f"<assistant_message>\n{content}\n</assistant_message>")
             elif role == "tool":
-                parts.append(f"[Tool result] [t:{_turn_nonce()}]: {content}")
+                history_parts.append(f"<tool_result>\n{content}\n</tool_result>")
 
-        return "\n\n".join(parts)
+        user_content_parts: List[str] = []
+        if history_parts:
+            user_content_parts.append("<conversation_history>")
+            user_content_parts.extend(history_parts)
+            user_content_parts.append("</conversation_history>")
+
+        if current_msg is not None:
+            user_content_parts.append(f"<current_input>\n{current_msg[1]}\n</current_input>")
+
+        user_content = "\n\n".join(user_content_parts)
+        return system_prompt, user_content
 
     @staticmethod
     def _get_field(obj, field: str):
