@@ -323,14 +323,17 @@ class LettaCoreToolExecutor(ToolExecutor):
     async def archival_memory_delete(
         self, agent_state: AgentState, actor: User, passage_id: str
     ) -> str:
-        """Delete an archival memory passage by its ID."""
+        """Delete an archival memory passage by its ID. 이미 삭제된 ID는 idempotent하게 성공 처리."""
         if not passage_id or not str(passage_id).strip():
             raise ValueError("passage_id must be a non-empty string")
-        await self.passage_manager.delete_agent_passage_by_id_async(
-            passage_id=str(passage_id).strip(), actor=actor
-        )
+        pid = str(passage_id).strip()
+        try:
+            await self.passage_manager.delete_agent_passage_by_id_async(passage_id=pid, actor=actor)
+        except NoResultFound:
+            # 이미 삭제됐거나 존재하지 않는 ID — LLM이 멈출 수 있게 success 메시지로 반환
+            return f"Passage {pid} was already deleted or does not exist (no action needed)."
         await self.agent_manager.rebuild_system_prompt_async(agent_id=agent_state.id, actor=actor, force=True)
-        return f"Deleted archival passage: {passage_id}"
+        return f"Deleted archival passage: {pid}"
 
     async def core_memory_append(self, agent_state: AgentState, actor: User, label: str, content: str) -> str:
         if agent_state.memory.get_block(label).read_only:
