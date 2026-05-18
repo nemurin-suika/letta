@@ -191,6 +191,28 @@ async def archival_memory_insert(self: "Agent", content: str, tags: Optional[lis
     raise NotImplementedError("This should never be invoked directly. Contact Letta if you see this error message.")
 
 
+async def archival_memory_delete(self: "Agent", passage_id: str) -> Optional[str]:
+    """
+    Delete a single passage from archival memory by its ID.
+
+    Use this to remove incorrect, hallucinated, or no-longer-relevant entries.
+    You must obtain the exact passage ID from a prior `archival_memory_search`
+    result — never pass placeholders like "..." or guessed IDs.
+
+    Args:
+        passage_id: The exact ID of the passage to delete (format: "passage-<uuid>").
+
+    Returns:
+        Confirmation message indicating the deletion result.
+
+    Examples:
+        archival_memory_delete(
+            passage_id="passage-323de23a-2b4c-4a73-89f0-88f8c6be2929"
+        )
+    """
+    raise NotImplementedError("This should never be invoked directly. Contact Letta if you see this error message.")
+
+
 async def archival_memory_search(
     self: "Agent",
     query: str,

@@ -44,6 +44,7 @@ class LettaCoreToolExecutor(ToolExecutor):
             "conversation_search": self.conversation_search,
             "archival_memory_search": self.archival_memory_search,
             "archival_memory_insert": self.archival_memory_insert,
+            "archival_memory_delete": self.archival_memory_delete,
             "core_memory_append": self.core_memory_append,
             "core_memory_replace": self.core_memory_replace,
             "memory_replace": self.memory_replace,
@@ -318,6 +319,18 @@ class LettaCoreToolExecutor(ToolExecutor):
         )
         await self.agent_manager.rebuild_system_prompt_async(agent_id=agent_state.id, actor=actor, force=True)
         return None
+
+    async def archival_memory_delete(
+        self, agent_state: AgentState, actor: User, passage_id: str
+    ) -> str:
+        """Delete an archival memory passage by its ID."""
+        if not passage_id or not str(passage_id).strip():
+            raise ValueError("passage_id must be a non-empty string")
+        await self.passage_manager.delete_agent_passage_by_id_async(
+            passage_id=str(passage_id).strip(), actor=actor
+        )
+        await self.agent_manager.rebuild_system_prompt_async(agent_id=agent_state.id, actor=actor, force=True)
+        return f"Deleted archival passage: {passage_id}"
 
     async def core_memory_append(self, agent_state: AgentState, actor: User, label: str, content: str) -> str:
         if agent_state.memory.get_block(label).read_only:

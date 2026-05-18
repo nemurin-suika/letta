@@ -95,10 +95,11 @@ def print_archival_memory(passages: list) -> None:
         print("  (없음)")
         return
     for i, p in enumerate(passages, 1):
+        pid = p.get("id", "")
         created_at = p.get("created_at", "")[:19].replace("T", " ")
         tags = p.get("tags") or []
         tags_str = f"  tags: {', '.join(tags)}" if tags else ""
-        print(f"\n[{i}] {created_at}{tags_str}")
+        print(f"\n[{i}] {created_at}  id: {pid}{tags_str}")
         print("-" * 40)
         print(p.get("text", ""))
 

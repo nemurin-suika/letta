@@ -56,6 +56,11 @@ _ARCHIVAL_SEARCH_RE = re.compile(
     r'<letta_archival_search([^>]*)>(.*?)</letta_archival_search>',
     re.DOTALL,
 )
+# 두 형식 모두 허용: <letta_archival_delete id="passage-..." /> 또는 <letta_archival_delete>passage-...</letta_archival_delete>
+_ARCHIVAL_DELETE_RE = re.compile(
+    r'<letta_archival_delete(?:\s+id=["\']?([^"\'>\s]+)["\']?\s*/?>|>(.*?)</letta_archival_delete>)',
+    re.DOTALL,
+)
 _ATTR_RE = re.compile(r'(\w+)=["\']?([^"\'>\s]*)["\']?')
 
 # [유튜브 링크]URL[/유튜브 링크] 패턴 — Open-LLM-VTuber에서 이미 영상 URL로 교체된 상태로 전달됨
@@ -142,8 +147,9 @@ MEMORY_INSTRUCTIONS = """\
 - **archival memory**: "너무 상세해서 core 메모리에 담기엔 길지만, 나중에 검색해서 찾을 수 있어야 하는 내용일까?"
 
 특히 아래는 반드시 archival memory에 기록하세요 (persona 블록이 아님 — 상세 기록은 archival에):
-- 후원/구독 이벤트: 누가, 얼마를, 어떤 말과 함께, 몇 번째 후원인지 (예: "몽팬님 첫 후원 1000원 — 채팅/후원 테스트 겸")
-- 인상적인 시청자: 자주 오거나 특별한 교류가 있었던 사람과 그 이유
+- **내 방송**의 후원/구독 이벤트: 누가, 얼마를, 어떤 말과 함께, 몇 번째 후원인지 (예: "몽팬님 첫 후원 1000원 — 채팅/후원 테스트 겸")
+  - 다른 스트리머 방송을 시청 중일 때 발생한 후원/구독은 저장하지 마세요. 내 방송에서 직접 받은 것만 기록 대상입니다.
+- **내 방송**의 인상적인 시청자: 자주 오거나 특별한 교류가 있었던 사람과 그 이유
 
 저장 안 해도 되는 것: 지금 이 순간만의 상황, 이미 블록에 있는 내용의 반복.
 
@@ -175,6 +181,23 @@ MEMORY_INSTRUCTIONS = """\
 
 검색 (관련 기억이 archival에 있을 것 같을 때):
 <letta_archival_search>검색 쿼리</letta_archival_search>
+
+삭제 — 잘못된 기억이나 환각 기록을 정리할 때 사용.
+
+**중요한 사용 규칙:**
+1. **반드시 먼저 `letta_archival_search`로 검색해서 실제 passage ID를 확보**한 뒤 삭제하세요.
+2. 검색 결과 JSON 안의 `"id"` 필드 값을 정확히 복사해서 사용하세요 (예: `passage-323de23a-2b4c-4a73-89f0-88f8c6be2929`).
+3. **절대로 `...`, `passage-...`, `passage-xxx` 같은 플레이스홀더로 호출하지 마세요.** 가짜 ID는 무조건 삭제 실패합니다.
+4. 한 번에 여러 개 삭제하려면 태그를 여러 줄 나란히 적으면 됩니다.
+
+올바른 사용 예시:
+<letta_archival_delete id="passage-323de23a-2b4c-4a73-89f0-88f8c6be2929"/>
+<letta_archival_delete id="passage-a6a1c2ed-f97d-461d-9720-2faad8cf3db2"/>
+
+잘못된 예시 (실패합니다):
+<letta_archival_delete id="passage-..."/>
+<letta_archival_delete id="..."/>
+<letta_archival_delete>passage-임의값</letta_archival_delete>
 
 메모리 태그는 응답 맨 끝에만 추가하세요.
 </letta_memory_instructions>"""
@@ -476,12 +499,36 @@ class ClaudeCLIClient(LLMClientBase):
                 )
             )
 
+        # archival_memory_delete 태그 처리 (속성 id="..." 또는 본문에 passage_id)
+        # 명백한 플레이스홀더(요약·예시 인용)는 건너뜀 — 진짜 UUID 형식만 허용.
+        _passage_uuid_re = re.compile(r"^passage-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+        for match in _ARCHIVAL_DELETE_RE.finditer(text):
+            passage_id = (match.group(1) or match.group(2) or "").strip()
+            if not passage_id:
+                continue
+            if not _passage_uuid_re.match(passage_id):
+                logger.warning(
+                    f"[ClaudeCLI] archival_memory_delete 무시 — 유효한 passage ID 형식 아님: {passage_id!r}"
+                )
+                continue
+            tool_calls.append(
+                ToolCall(
+                    id=_make_id(),
+                    type="function",
+                    function=FunctionCall(
+                        name="archival_memory_delete",
+                        arguments=json.dumps({"passage_id": passage_id}, ensure_ascii=False),
+                    ),
+                )
+            )
+
         if tool_calls:
             # 태그 전체를 응답 텍스트에서 제거
             clean = _APPEND_RE.sub("", text)
             clean = _REPLACE_RE.sub("", clean)
             clean = _ARCHIVAL_INSERT_RE.sub("", clean)
             clean = _ARCHIVAL_SEARCH_RE.sub("", clean)
+            clean = _ARCHIVAL_DELETE_RE.sub("", clean)
             clean = clean.rstrip()
             logger.info(f"[ClaudeCLI] 메모리 작업 {len(tool_calls)}개 파싱: {[tc.function.name for tc in tool_calls]}")
         else:
