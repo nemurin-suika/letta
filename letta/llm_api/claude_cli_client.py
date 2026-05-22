@@ -204,6 +204,29 @@ MEMORY_INSTRUCTIONS = """\
 </letta_memory_instructions>"""
 
 
+# 스크린샷/유튜브 프레임 임시 파일 보존 시간(초).
+# 한 대화 턴에서 Letta가 메모리 작업 등으로 claude -p를 여러 번 호출할 수 있기 때문에
+# 즉시 삭제하면 후속 호출에서 파일이 사라져 "이전 화면 — 내용은 이미 처리됨"으로 표시된다.
+# TTL을 두고 매 호출 시작 시 stale 파일만 정리한다.
+_SCREENSHOT_FILE_TTL = 600  # 10분
+
+
+def _cleanup_stale_screenshot_files() -> None:
+    """TTL을 초과한 스크린샷/유튜브 프레임 임시 파일 삭제."""
+    now = time.time()
+    deleted = 0
+    for pattern in ("/tmp/claude_screenshot_*", "/tmp/claude_yt_frame_*"):
+        for f in glob.glob(pattern):
+            try:
+                if now - os.path.getmtime(f) > _SCREENSHOT_FILE_TTL:
+                    os.unlink(f)
+                    deleted += 1
+            except Exception:
+                pass
+    if deleted:
+        logger.debug(f"[ClaudeCLI] stale 스크린샷 {deleted}개 삭제")
+
+
 class ClaudeCLIClient(LLMClientBase):
     """claude -p 서브프로세스를 LLM 백엔드로 사용하는 클라이언트."""
 
@@ -247,6 +270,10 @@ class ClaudeCLIClient(LLMClientBase):
                 message="'claude' CLI를 PATH에서 찾을 수 없습니다. Claude Code CLI를 설치하세요.",
                 code=ErrorCode.INTERNAL_SERVER_ERROR,
             )
+
+        # 한 대화 턴 안에서 여러 LLM 호출이 같은 스크린샷 파일을 참조할 수 있도록
+        # 즉시 삭제하지 않고, 매 호출 시작 시 TTL 초과 파일만 정리한다.
+        _cleanup_stale_screenshot_files()
 
         system_prompt = request_data["system_prompt"]
         user_content = request_data["user_content"]
@@ -292,14 +319,6 @@ class ClaudeCLIClient(LLMClientBase):
                 message=f"claude CLI 실행 실패: {e}",
                 code=ErrorCode.INTERNAL_SERVER_ERROR,
             )
-        finally:
-            # 처리 완료 후 스크린샷 temp 파일 삭제
-            for f in screenshot_files:
-                try:
-                    os.unlink(f)
-                    logger.debug(f"[ClaudeCLI] temp 파일 삭제: {f}")
-                except Exception:
-                    pass
 
         stdout_text = stdout.decode().strip()
         stderr_text = stderr.decode().strip()
