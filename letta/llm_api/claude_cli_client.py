@@ -111,25 +111,51 @@ def _expand_web_links(text: str) -> str:
 
 
 def _expand_screenshots(text: str) -> str:
-    """[스크린샷] 태그를 Read 지시문으로 변환. 파일이 없으면 '이전 스크린샷'으로 대체."""
+    """[스크린샷] 태그를 Read 지시문으로 변환. 파일이 없으면 '이전 스크린샷'으로 대체.
+
+    ago=Ns 속성이 있으면 시간 라벨 적용:
+    - ago=0s → "현재 화면"
+    - ago>0  → "N초 전 화면"
+    """
     def replace(m: re.Match) -> str:
         attrs = m.group(1)
         file_path = m.group(2).strip()
         source_m = re.search(r"source=(\w+)", attrs)
         source = source_m.group(1) if source_m else "screen"
-        label = {"screen": "화면", "camera": "카메라", "youtube_frame": "유튜브 영상 프레임"}.get(source, "화면")
+        ago_m = re.search(r"ago=([\d.]+)s", attrs)
+        ago = float(ago_m.group(1)) if ago_m else None
+
+        source_label = {
+            "screen": "화면",
+            "camera": "카메라",
+            "youtube_frame": "유튜브 영상 프레임",
+        }.get(source, "화면")
+
+        # 시간 라벨 결정
+        if ago is None or source == "camera":
+            time_prefix = "현재"
+        elif ago <= 0.5:
+            time_prefix = "현재"
+        else:
+            # 정수면 "6초 전", 소수면 "1.5초 전"
+            ago_str = f"{int(ago)}" if ago == int(ago) else f"{ago:g}"
+            time_prefix = f"{ago_str}초 전"
+
+        full_label = f"{time_prefix} {source_label}"
 
         if file_path and os.path.exists(file_path):
             if source == "youtube_frame":
                 desc = "유튜브 영상의 특정 시점 프레임입니다. 영상 내용을 파악하는 데 활용하세요."
+            elif time_prefix == "현재":
+                desc = "지금 화면에 무엇이 보이는지 파악하세요."
             else:
-                desc = "화면에 무엇이 보이는지 파악하세요."
+                desc = f"{time_prefix} 화면입니다. 현재 화면과 비교해서 진행 흐름/변화를 파악하세요."
             return (
-                f"[현재 {label} 첨부됨]\n"
+                f"[{full_label} 첨부됨]\n"
                 f"Read 툴로 {file_path} 파일을 읽어 {desc}\n"
-                f"[/현재 {label} 첨부됨]"
+                f"[/{full_label} 첨부됨]"
             )
-        return f"[이전 {label} — 내용은 이미 처리됨]"
+        return f"[{full_label} — 내용은 이미 처리됨]"
 
     return _SCREENSHOT_RE.sub(replace, text)
 
