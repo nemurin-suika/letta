@@ -221,11 +221,6 @@ MEMORY_INSTRUCTIONS = """\
 <letta_archival_delete id="passage-323de23a-2b4c-4a73-89f0-88f8c6be2929"/>
 <letta_archival_delete id="passage-a6a1c2ed-f97d-461d-9720-2faad8cf3db2"/>
 
-잘못된 예시 (실패합니다):
-<letta_archival_delete id="passage-..."/>
-<letta_archival_delete id="..."/>
-<letta_archival_delete>passage-임의값</letta_archival_delete>
-
 메모리 태그는 응답 맨 끝에만 추가하세요.
 </letta_memory_instructions>"""
 
