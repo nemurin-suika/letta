@@ -5,6 +5,7 @@ if TYPE_CHECKING:
 
 from letta.log import get_logger
 from letta.otel.tracing import trace_method
+from letta.prompts.summarizer_prompt import SLIDING_CHAR_LIMIT, make_sliding_prompt
 from letta.schemas.enums import MessageRole
 from letta.schemas.llm_config import LLMConfig
 from letta.schemas.message import Message
@@ -202,12 +203,39 @@ async def summarize_via_sliding_window(
         f"Summarizing {len(messages_to_summarize)} messages, from index 1 to {assistant_message_index} (out of {total_message_count})"
     )
 
+    # 동적 압축 한도: 현재 요약 대상 메시지 글자 수의 절반으로 제한.
+    # 고정 글자 수 한도보다 적극적으로 압축하여 context window 초과 루프를 방지.
+    total_chars = sum(
+        len(part.text)
+        for msg in messages_to_summarize
+        for part in (msg.content if isinstance(msg.content, list) else [])
+        if hasattr(part, "text") and isinstance(part.text, str)
+    ) or sum(
+        len(msg.content)
+        for msg in messages_to_summarize
+        if isinstance(msg.content, str)
+    )
+    dynamic_clip_chars = max(200, total_chars // 2)
+    # LLM 지시 한도보다 10% 여유를 주어 하드 컷 적용
+    hard_clip_chars = int(dynamic_clip_chars * 1.1)
+
+    # 기본 슬라이딩 프롬프트를 사용 중이면 글자 수 한도도 동적으로 교체
+    effective_prompt = summarizer_config.prompt
+    if effective_prompt and f"under {SLIDING_CHAR_LIMIT} characters" in effective_prompt:
+        effective_prompt = make_sliding_prompt(dynamic_clip_chars)
+    effective_clip_chars = min(hard_clip_chars, summarizer_config.clip_chars or hard_clip_chars)
+
+    logger.info(
+        f"Dynamic summarization limits: total_chars={total_chars}, "
+        f"prompt_limit={dynamic_clip_chars}, hard_clip={effective_clip_chars}"
+    )
+
     summary_message_str = await simple_summary(
         messages=messages_to_summarize,
         llm_config=llm_config,
         actor=actor,
         include_ack=bool(summarizer_config.prompt_acknowledgement),
-        prompt=summarizer_config.prompt,
+        prompt=effective_prompt,
         agent_id=agent_id,
         agent_tags=agent_tags,
         run_id=run_id,
@@ -217,16 +245,16 @@ async def summarize_via_sliding_window(
             "messages_summarized": len(messages_to_summarize),
             "messages_kept": total_message_count - assistant_message_index,
             "sliding_window_percentage": summarizer_config.sliding_window_percentage,
-            "clip_chars": summarizer_config.clip_chars,
+            "clip_chars": effective_clip_chars,
         },
         billing_context=billing_context,
     )
 
     logger.info(f"\n==================\nSummary message string: {summary_message_str[:100]}...\n==================\n")
 
-    if summarizer_config.clip_chars is not None and len(summary_message_str) > summarizer_config.clip_chars:
-        logger.warning(f"Summary length {len(summary_message_str)} exceeds clip length {summarizer_config.clip_chars}. Truncating.")
-        summary_message_str = summary_message_str[: summarizer_config.clip_chars] + SUMMARY_TRUNCATION_SUFFIX
+    if effective_clip_chars is not None and len(summary_message_str) > effective_clip_chars:
+        logger.warning(f"Summary length {len(summary_message_str)} exceeds clip length {effective_clip_chars}. Truncating.")
+        summary_message_str = summary_message_str[:effective_clip_chars] + SUMMARY_TRUNCATION_SUFFIX
 
     updated_in_context_messages = in_context_messages[assistant_message_index:]
     return summary_message_str, [system_prompt, *updated_in_context_messages]

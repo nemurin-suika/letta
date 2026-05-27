@@ -5,6 +5,7 @@ from typing import List, Optional, Tuple
 from letta.llm_api.llm_client import LLMClient
 from letta.log import get_logger
 from letta.otel.tracing import trace_method
+from letta.prompts.summarizer_prompt import SLIDING_CHAR_LIMIT, make_self_sliding_prompt
 from letta.schemas.agent import AgentType
 from letta.schemas.enums import MessageRole, ProviderType
 from letta.schemas.letta_message_content import TextContent
@@ -240,6 +241,36 @@ async def self_summarize_sliding_window(
         f"Summarizing {len(messages_to_summarize)} messages with self summarization sliding window, from index 1 to {assistant_message_index} (out of {total_message_count})"
     )
 
+    # 동적 압축 한도: 요약 대상 메시지(시스템 제외) 글자 수의 절반으로 제한
+    content_messages = messages[1:assistant_message_index]
+    total_chars = sum(
+        len(part.text)
+        for msg in content_messages
+        for part in (msg.content if isinstance(msg.content, list) else [])
+        if hasattr(part, "text") and isinstance(part.text, str)
+    ) or sum(
+        len(msg.content)
+        for msg in content_messages
+        if isinstance(msg.content, str)
+    )
+    dynamic_clip_chars = max(200, total_chars // 2)
+    # LLM 지시 한도보다 10% 여유를 주어 하드 컷 적용
+    hard_clip_chars = int(dynamic_clip_chars * 1.1)
+
+    effective_settings = compaction_settings
+    if compaction_settings.prompt and f"under {SLIDING_CHAR_LIMIT} characters" in compaction_settings.prompt:
+        effective_clip = min(hard_clip_chars, compaction_settings.clip_chars or hard_clip_chars)
+        effective_settings = compaction_settings.model_copy(
+            update={
+                "prompt": make_self_sliding_prompt(dynamic_clip_chars),
+                "clip_chars": effective_clip,
+            }
+        )
+        logger.info(
+            f"Dynamic self-summarization limits: total_chars={total_chars}, "
+            f"prompt_limit={dynamic_clip_chars}, hard_clip={effective_clip}"
+        )
+
     # pass in messages_to_summarize instead of messages
     summary_text, final_messages = await self_summarize_all(
         actor=actor,
@@ -249,7 +280,7 @@ async def self_summarize_sliding_window(
         llm_client=llm_client,
         agent_type=agent_type,
         messages=messages_to_summarize,
-        compaction_settings=compaction_settings,
+        compaction_settings=effective_settings,
         timezone=timezone,
         run_id=run_id,
         step_id=step_id,

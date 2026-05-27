@@ -225,6 +225,10 @@ MEMORY_INSTRUCTIONS = """\
 </letta_memory_instructions>"""
 
 
+# claude -p 한 번의 호출 안에서 Claude가 수행할 수 있는 최대 agentic 턴 수.
+# 기억 압축/저장 루프가 무한 반복되는 상황을 방지한다.
+MAX_CLAUDE_CLI_TURNS = 15
+
 # 스크린샷/유튜브 프레임 임시 파일 보존 시간(초).
 # 한 대화 턴에서 Letta가 메모리 작업 등으로 claude -p를 여러 번 호출할 수 있기 때문에
 # 즉시 삭제하면 후속 호출에서 파일이 사라져 "이전 화면 — 내용은 이미 처리됨"으로 표시된다.
@@ -308,6 +312,7 @@ class ClaudeCLIClient(LLMClientBase):
             "--system-prompt", system_prompt,
             "--output-format", "json",
             "--allowedTools", allowed_tools,
+            "--max-turns", str(MAX_CLAUDE_CLI_TURNS),
         ]
         if model and model != "claude-cli":
             cmd.extend(["--model", model])
@@ -374,6 +379,23 @@ class ClaudeCLIClient(LLMClientBase):
                 message=f"claude CLI 오류: {error_msg}",
                 code=ErrorCode.INTERNAL_SERVER_ERROR,
             )
+
+        # 최대 턴 수 도달 여부 확인
+        num_turns = result.get("num_turns") or result.get("turns") or 0
+        if num_turns:
+            if num_turns >= MAX_CLAUDE_CLI_TURNS:
+                logger.error(
+                    f"[ClaudeCLI] 최대 턴 수({MAX_CLAUDE_CLI_TURNS}) 도달 — 무한 루프 방지로 중단합니다. "
+                    f"(num_turns={num_turns})"
+                )
+                raise LLMServerError(
+                    message=f"claude CLI 최대 턴 수({MAX_CLAUDE_CLI_TURNS}) 초과: 무한 루프 방지로 중단됨",
+                    code=ErrorCode.INTERNAL_SERVER_ERROR,
+                )
+            elif num_turns >= MAX_CLAUDE_CLI_TURNS * 0.8:
+                logger.warning(
+                    f"[ClaudeCLI] 턴 수가 한도에 근접합니다 (num_turns={num_turns}, max={MAX_CLAUDE_CLI_TURNS})"
+                )
 
         return result
 

@@ -1,5 +1,6 @@
 ALL_WORD_LIMIT = 500
-SLIDING_WORD_LIMIT = 300
+SLIDING_WORD_LIMIT = 300  # 하위 호환용 — 내부적으로는 SLIDING_CHAR_LIMIT 사용
+SLIDING_CHAR_LIMIT = 1500  # 슬라이딩 윈도우 요약 기본 글자 수 한도
 
 ALL_PROMPT = f"""Your task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests and your previous actions.
 This summary should be thorough in capturing technical details, code patterns, and architectural decisions that would be essential for continuing development work without losing context. Your summary should include the following sections:
@@ -44,7 +45,7 @@ SLIDING_PROMPT = f"""The following messages are being evicted from the BEGINNING
 
 Write in first person as a factual record of what occurred. Be thorough and detailed - the goal is to preserve enough context that the recent messages make sense and important information isn't lost to prevent duplicate work or repeated mistakes.
 
-Keep your summary under {SLIDING_WORD_LIMIT} words. Only output the summary.
+Keep your summary under {SLIDING_CHAR_LIMIT} characters. Only output the summary.
 
 IMPORTANT: You MUST write the entire summary in Korean (한국어). Do not use English in the summary output."""
 
@@ -68,7 +69,7 @@ You MUST include the following sections:
 
 Write in first person as a factual record of what occurred. Be thorough and detailed - the goal is to preserve enough context that the recent messages make sense and important information isn't lost to prevent duplicate work or repeated mistakes.
 
-Keep your summary under {SLIDING_WORD_LIMIT} words. IMPORTANT: Do NOT use any tools. Do NOT continue the conversation. You MUST respond with ONLY the summary as text output. Generate the summary with each section as mentioned.
+Keep your summary under {SLIDING_CHAR_LIMIT} characters. IMPORTANT: Do NOT use any tools. Do NOT continue the conversation. You MUST respond with ONLY the summary as text output. Generate the summary with each section as mentioned.
 
 You MUST write the entire summary in Korean (한국어). Do not use English in the summary output.
 """
@@ -152,7 +153,7 @@ This summary will appear BEFORE the remaining recent messages in context, provid
 
 Write in first person as a factual record of what occurred. Be thorough and detailed - the goal is to preserve enough context that the recent messages make sense and important information isn't lost.
 
-Keep your summary under {SLIDING_WORD_LIMIT} words. Only output the summary."""
+Keep your summary under {SLIDING_CHAR_LIMIT} characters. Only output the summary."""
 
 SELF_SUMMARIZATION_PROMPT = """Your task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests and your previous actions.
 This summary should be thorough in capturing technical details, code patterns, and architectural decisions that would be essential for continuing development work without losing context.
@@ -253,3 +254,13 @@ When you are using compact - please focus on test output and code changes. Inclu
 
 IMPORTANT: Do NOT use any tools. You MUST respond with ONLY the <summary>...</summary> block as your text output.
 """
+
+
+def make_sliding_prompt(char_limit: int) -> str:
+    """Return the sliding-window summary prompt with a custom character limit."""
+    return SLIDING_PROMPT.replace(f"under {SLIDING_CHAR_LIMIT} characters", f"under {char_limit} characters")
+
+
+def make_self_sliding_prompt(char_limit: int) -> str:
+    """Return the self-compact sliding-window prompt with a custom character limit."""
+    return SELF_SLIDING_PROMPT.replace(f"under {SLIDING_CHAR_LIMIT} characters", f"under {char_limit} characters")
