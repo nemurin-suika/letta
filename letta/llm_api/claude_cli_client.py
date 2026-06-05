@@ -227,7 +227,7 @@ MEMORY_INSTRUCTIONS = """\
 
 # claude -p 한 번의 호출 안에서 Claude가 수행할 수 있는 최대 agentic 턴 수.
 # 기억 압축/저장 루프가 무한 반복되는 상황을 방지한다.
-MAX_CLAUDE_CLI_TURNS = 15
+MAX_CLAUDE_CLI_TURNS = 30
 
 # 스크린샷/유튜브 프레임 임시 파일 보존 시간(초).
 # 한 대화 턴에서 Letta가 메모리 작업 등으로 claude -p를 여러 번 호출할 수 있기 때문에
