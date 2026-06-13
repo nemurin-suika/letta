@@ -32,6 +32,7 @@ class LLMConfig(BaseModel):
         "openai",
         "anthropic",
         "claude_cli",
+        "codex_cli",
         "google_ai",
         "google_live",
         "google_vertex",
@@ -363,6 +364,7 @@ class LLMConfig(BaseModel):
             AnthropicModelSettings,
             AnthropicThinking,
             ClaudeCLIModelSettings,
+            CodexCLIModelSettings,
             AzureModelSettings,
             BedrockModelSettings,
             ChatGPTOAuthModelSettings,
@@ -401,6 +403,10 @@ class LLMConfig(BaseModel):
             )
         elif self.model_endpoint_type == "claude_cli":
             return ClaudeCLIModelSettings(
+                max_output_tokens=self.max_tokens or 8192,
+            )
+        elif self.model_endpoint_type == "codex_cli":
+            return CodexCLIModelSettings(
                 max_output_tokens=self.max_tokens or 8192,
             )
         elif self.model_endpoint_type == "anthropic":

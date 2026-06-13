@@ -7,8 +7,9 @@ from .baseten import BasetenProvider
 from .bedrock import BedrockProvider
 from .cerebras import CerebrasProvider
 from .chatgpt_oauth import ChatGPTOAuthProvider
-from .deepseek import DeepSeekProvider
 from .claude_cli import ClaudeCLIProvider
+from .codex_cli import CodexCLIProvider
+from .deepseek import DeepSeekProvider
 from .google_gemini import GoogleAIProvider
 from .google_live import GoogleLiveProvider
 from .google_vertex import GoogleVertexProvider
@@ -30,6 +31,7 @@ __all__ = [
     "AnthropicProvider",
     "AzureProvider",
     "ClaudeCLIProvider",
+    "CodexCLIProvider",
     "BasetenProvider",
     "BedrockProvider",
     "CerebrasProvider",

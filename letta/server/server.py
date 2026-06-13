@@ -52,6 +52,7 @@ from letta.schemas.providers import (
     BasetenProvider,
     BedrockProvider,
     ClaudeCLIProvider,
+    CodexCLIProvider,
     DeepSeekProvider,
     GoogleAIProvider,
     GoogleLiveProvider,
@@ -243,6 +244,10 @@ class SyncServer(object):
         if shutil.which("claude"):
             self._enabled_providers.append(
                 ClaudeCLIProvider(name="claude_cli")
+            )
+        if shutil.which("codex"):
+            self._enabled_providers.append(
+                CodexCLIProvider(name="codex_cli")
             )
         if model_settings.gemini_api_key:
             self._enabled_providers.append(

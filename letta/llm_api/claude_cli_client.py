@@ -317,12 +317,18 @@ class ClaudeCLIClient(LLMClientBase):
         if model and model != "claude-cli":
             cmd.extend(["--model", model])
 
+        # VTuber 도구 승인 hook 연동(opt-in). env가 설정돼 있으면 PreToolUse hook을
+        # 등록한 settings 파일을 주입해, allowedTools 밖의 도구는 프론트로 승인을 받게 한다.
+        # env 미설정 시 기존 동작 그대로(다른 letta 사용에 영향 없음).
+        hook_settings = os.environ.get("VTUBER_CLAUDE_HOOK_SETTINGS")
+        if hook_settings and os.path.exists(hook_settings):
+            cmd.extend(["--settings", hook_settings])
+
         logger.info(
             f"[ClaudeCLI] 실행: claude -p <user({len(user_content)}chars)> "
             f"--system-prompt <sys({len(system_prompt)}chars)> "
             f"--output-format json (screenshots={len(screenshot_files)})"
         )
-        TIMEOUT_SECONDS = 300  # 5분
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -330,16 +336,7 @@ class ClaudeCLIClient(LLMClientBase):
                 stderr=asyncio.subprocess.PIPE,
                 cwd="/tmp",  # 프로젝트 CLAUDE.md 컨텍스트 격리
             )
-            try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=TIMEOUT_SECONDS)
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.communicate()  # 버퍼 정리
-                logger.error(f"[ClaudeCLI] {TIMEOUT_SECONDS}초 타임아웃 — 프로세스 강제 종료")
-                raise LLMServerError(
-                    message=f"claude CLI 타임아웃: {TIMEOUT_SECONDS}초 초과",
-                    code=ErrorCode.INTERNAL_SERVER_ERROR,
-                )
+            stdout, stderr = await proc.communicate()
         except OSError as e:
             raise LLMConnectionError(
                 message=f"claude CLI 실행 실패: {e}",

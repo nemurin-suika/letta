@@ -309,8 +309,8 @@ model:
   #   api_key: ""
 
   # Ollama (-> OLLAMA_*)
-  # ollama:
-  #   base_url: ""
+  ollama:
+    base_url: "http://192.168.0.15:11434"
 
   # vLLM (-> VLLM_*)
   # vllm:

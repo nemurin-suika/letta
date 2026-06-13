@@ -1409,9 +1409,9 @@ class LettaAgentV3(LettaAgentV2):
 
                 # Enforce parallel_tool_calls=false by truncating to first tool call
                 # Some providers (e.g. Gemini) don't respect this setting via API, so we enforce it client-side
-                # claude_cli는 응답 내 메모리 태그를 한 번에 여러 개 처리하는 설계이므로 예외
-                is_claude_cli = (active_llm_config.model_endpoint_type or "").lower() == "claude_cli"
-                if len(tool_calls) > 1 and not active_llm_config.parallel_tool_calls and not is_claude_cli:
+                # CLI providers parse memory tags into multiple tool calls in one response.
+                is_memory_tag_cli = (active_llm_config.model_endpoint_type or "").lower() in {"claude_cli", "codex_cli"}
+                if len(tool_calls) > 1 and not active_llm_config.parallel_tool_calls and not is_memory_tag_cli:
                     self.logger.warning(
                         f"LLM returned {len(tool_calls)} tool calls but parallel_tool_calls=false. "
                         f"Truncating to first tool call: {tool_calls[0].function.name}"

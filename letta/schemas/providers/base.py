@@ -182,6 +182,7 @@ class Provider(ProviderBase):
             AnthropicProvider,
             AzureProvider,
             ClaudeCLIProvider,
+            CodexCLIProvider,
             BasetenProvider,
             BedrockProvider,
             CerebrasProvider,
@@ -218,6 +219,8 @@ class Provider(ProviderBase):
                 return AnthropicProvider(**self.model_dump(exclude_none=True))
             case ProviderType.claude_cli:
                 return ClaudeCLIProvider(**self.model_dump(exclude_none=True))
+            case ProviderType.codex_cli:
+                return CodexCLIProvider(**self.model_dump(exclude_none=True))
             case ProviderType.google_ai:
                 return GoogleAIProvider(**self.model_dump(exclude_none=True))
             case ProviderType.google_live:

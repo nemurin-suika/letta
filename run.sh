@@ -18,6 +18,13 @@ PG_PORT="5432"
 PGDATA_DIR="$HOME/.letta/.persist/pgdata"  # Docker 모드용 데이터 디렉터리
 PG_CONTAINER="letta-postgres"
 
+# export 필수 — claude 서브프로세스(claude_cli_client.py가 os.environ.get으로 읽음)까지 전달돼야 hook이 붙는다.
+export VTUBER_CLAUDE_HOOK_SETTINGS=/Users/nemulin/develop/Open-LLM-VTuber-v1.2.1-en/scripts/claude_hook_settings.json
+# 승인 서버 주소 — 백엔드가 conf.yaml host(192.168.0.5)에만 바인드되므로 127.0.0.1로는 연결 안 됨.
+# 백엔드 host를 바꾸면 이 값도 같이 맞춰야 한다.
+export VTUBER_APPROVAL_URL=http://192.168.0.5:12393/tool-approval
+
+
 # ── 실행 모드 파싱 ────────────────────────────────────────────────────────────
 # ./run.sh          → Docker 모드 (기본)
 # ./run.sh --local  → 로컬 직접 실행 모드
@@ -35,6 +42,7 @@ if [ "$MODE" = "local" ]; then
 
     export PATH="$PG_BIN:$PATH"
     mkdir -p ~/.letta/logs/claude_cli_debug
+    mkdir -p ~/.letta/logs/codex_cli_debug
 
     # ── Claude CLI 로그인 확인 ──────────────────────────────────────────────
     if ! command -v claude &>/dev/null; then
@@ -116,6 +124,7 @@ if [ "$MODE" = "local" ]; then
     LOG_DIR="${HOME}/.letta/logs"
     export LETTA_WORKER_LOG_DIR="${HOME}/.letta/logs"
     export LETTA_CLAUDE_CLI_DEBUG_DIR="${HOME}/.letta/logs/claude_cli_debug"
+    export LETTA_CODEX_CLI_DEBUG_DIR="${HOME}/.letta/logs/codex_cli_debug"
     export LETTA_REDIS_HOST="$REDIS_HOST"
     export LETTA_REDIS_PORT="$REDIS_PORT"
     export LETTA_UVICORN_WORKERS="${_WORKERS}"
