@@ -455,6 +455,7 @@ class ClaudeCLIClient(LLMClientBase):
             "claude", "-p", user_content,
             "--system-prompt", system_prompt,
             "--output-format", "stream-json",  # 실시간 스트리밍으로 중간 알림 감지
+            "--verbose",  # -p + stream-json 조합은 --verbose 필수 (없으면 CLI가 거부)
             "--allowedTools", allowed_tools,
             "--max-turns", str(MAX_CLAUDE_CLI_TURNS),
         ]
@@ -479,6 +480,10 @@ class ClaudeCLIClient(LLMClientBase):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd="/tmp",  # 프로젝트 CLAUDE.md 컨텍스트 격리
+                # stream-json 한 이벤트(줄)가 기본 64KB 한계를 넘으면 readline이
+                # "Separator is not found, and chunk exceed the limit"로 터진다.
+                # 큰 파일 Read 결과/긴 assistant 텍스트 대비 버퍼를 64MB로 확대.
+                limit=64 * 1024 * 1024,
             )
         except OSError as e:
             raise LLMConnectionError(
