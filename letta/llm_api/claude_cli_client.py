@@ -4,11 +4,13 @@ Gemini rate limit 시 fallback으로 사용. API 키 없이 Claude CLI 구독을
 """
 
 import asyncio
+import datetime
 import glob
 import json
 import os
 import re
 import shutil
+import subprocess
 import time
 import uuid
 from typing import TYPE_CHECKING, List, Optional, Tuple
@@ -159,6 +161,133 @@ def _expand_screenshots(text: str) -> str:
 
     return _SCREENSHOT_RE.sub(replace, text)
 
+
+# ---------------------------------------------------------------------------
+# Claude Code OAuth 사용량 자동 주입
+# ---------------------------------------------------------------------------
+
+_usage_cache: dict = {"data": "", "ts": 0.0}
+_USAGE_CACHE_TTL = 120  # 2분 캐시
+
+
+def _get_claude_oauth_token() -> str:
+    """macOS 키체인 'Claude Code-credentials'에서 OAuth 토큰 반환."""
+    try:
+        result = subprocess.run(
+            ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            raw = result.stdout.strip()
+            # 키체인 값이 JSON 형태인 경우 accessToken 추출
+            if raw.startswith("{"):
+                try:
+                    creds = json.loads(raw)
+                    token = creds.get("claudeAiOauth", {}).get("accessToken", "")
+                    if token.startswith("sk-ant-oat01-"):
+                        return token
+                except Exception:
+                    pass
+            elif raw.startswith("sk-ant-oat01-"):
+                return raw
+    except Exception:
+        pass
+    return ""
+
+
+def _fetch_claude_usage_sync() -> str:
+    """Claude Code OAuth usage API 동기 호출 → 포맷된 문자열 반환. 실패 시 빈 문자열."""
+    now = time.time()
+    if _usage_cache["data"] and now - _usage_cache["ts"] < _USAGE_CACHE_TTL:
+        return _usage_cache["data"]
+
+    token = _get_claude_oauth_token()
+    if not token:
+        return ""
+
+    try:
+        import httpx
+        resp = httpx.get(
+            "https://claude.ai/api/oauth/usage",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                ),
+            },
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            logger.warning(f"[ClaudeCLI] usage API HTTP {resp.status_code}")
+            return ""
+        data = resp.json()
+
+        five_h = data.get("five_hour", {}) or {}
+        seven_d = data.get("seven_day", {}) or {}
+        seven_d_s = data.get("seven_day_sonnet", {}) or {}
+
+        # API가 utilization을 0~100 퍼센트 스케일로 반환 (0~1이 아님)
+        five_h_util = float(five_h.get("utilization", 0))
+        seven_d_util = float(seven_d.get("utilization", 0))
+        seven_d_s_util = float(seven_d_s.get("utilization", 0))
+
+        # 5시간 롤링 리셋 시각 (UTC → KST) — API 필드명: resets_at
+        reset_label = ""
+        five_h_reset = five_h.get("resets_at", "")
+        if five_h_reset:
+            try:
+                dt = datetime.datetime.fromisoformat(five_h_reset.replace("Z", "+00:00"))
+                kst = dt + datetime.timedelta(hours=9)
+                reset_label = f" (리셋 KST {kst.strftime('%H:%M')})"
+            except Exception:
+                pass
+
+        result_str = (
+            f"[현재 Claude Code 사용량]\n"
+            f"- 5시간 롤링: {five_h_util:.1f}%{reset_label}\n"
+            f"- 7일: {seven_d_util:.1f}%\n"
+            f"- 7일(Sonnet): {seven_d_s_util:.1f}%"
+        )
+
+        _usage_cache["data"] = result_str
+        _usage_cache["ts"] = now
+
+        # JSON 파일로도 저장 (Open-LLM-VTuber 백엔드가 읽어서 웹소켓으로 전송)
+        try:
+            reset_kst = ""
+            if five_h_reset:
+                try:
+                    dt = datetime.datetime.fromisoformat(five_h_reset.replace("Z", "+00:00"))
+                    kst = dt + datetime.timedelta(hours=9)
+                    reset_kst = kst.strftime("%H:%M")
+                except Exception:
+                    pass
+            usage_json = {
+                "five_h": round(five_h_util, 1),
+                "seven_d": round(seven_d_util, 1),
+                "seven_d_s": round(seven_d_s_util, 1),
+                "five_h_reset_kst": reset_kst,
+            }
+            with open("/tmp/claude_usage_cache.json", "w", encoding="utf-8") as _f:
+                json.dump(usage_json, _f)
+        except Exception as _e:
+            logger.warning(f"[ClaudeCLI] usage JSON 파일 저장 실패: {_e}")
+
+        logger.info(f"[ClaudeCLI] usage 갱신: 5h={five_h_util:.1f}% 7d={seven_d_util:.1f}%")
+        return result_str
+
+    except Exception as e:
+        logger.warning(f"[ClaudeCLI] usage API 호출 실패: {type(e).__name__}: {e}")
+        return ""
+
+
+async def _fetch_claude_usage_async() -> str:
+    """비동기 래퍼 (asyncio.to_thread 사용)."""
+    return await asyncio.to_thread(_fetch_claude_usage_sync)
+
+
 MEMORY_INSTRUCTIONS = """\
 
 <letta_memory_instructions>
@@ -227,7 +356,12 @@ MEMORY_INSTRUCTIONS = """\
 
 # claude -p 한 번의 호출 안에서 Claude가 수행할 수 있는 최대 agentic 턴 수.
 # 기억 압축/저장 루프가 무한 반복되는 상황을 방지한다.
-MAX_CLAUDE_CLI_TURNS = 30
+MAX_CLAUDE_CLI_TURNS = 60
+
+# 중간 진행 알림 공유 파일 (Open-LLM-VTuber 백엔드가 polling해서 채팅창에 표시)
+PROGRESS_NOTIFY_FILE = "/tmp/mizuki_progress_notify.jsonl"
+# claude 응답 텍스트에서 [알림: 내용] 패턴 감지
+_NOTIFY_PATTERN = re.compile(r'\[알림:\s*(.*?)\]', re.DOTALL)
 
 # 스크린샷/유튜브 프레임 임시 파일 보존 시간(초).
 # 한 대화 턴에서 Letta가 메모리 작업 등으로 claude -p를 여러 번 호출할 수 있기 때문에
@@ -305,12 +439,22 @@ class ClaudeCLIClient(LLMClientBase):
         model = request_data.get("model", "")
         screenshot_files: list = request_data.get("screenshot_files", [])
 
+        # Claude Code 사용량 캐시 갱신 (백그라운드, 실패 시 무시) — 프론트 프로그레스 바용
+        asyncio.create_task(_fetch_claude_usage_async())
+
+        # 중간 알림 파일 초기화 (이번 호출의 알림만 담도록 매번 비움)
+        try:
+            with open(PROGRESS_NOTIFY_FILE, "w", encoding="utf-8") as _nf:
+                pass
+        except Exception:
+            pass
+
         # 스크린샷 파일이 있으면 Read 툴도 허용
         allowed_tools = "WebFetch,Read(/tmp/claude_screenshot*),Read(/tmp/claude_yt_frame*)" if screenshot_files else "WebFetch"
         cmd = [
             "claude", "-p", user_content,
             "--system-prompt", system_prompt,
-            "--output-format", "json",
+            "--output-format", "stream-json",  # 실시간 스트리밍으로 중간 알림 감지
             "--allowedTools", allowed_tools,
             "--max-turns", str(MAX_CLAUDE_CLI_TURNS),
         ]
@@ -327,7 +471,7 @@ class ClaudeCLIClient(LLMClientBase):
         logger.info(
             f"[ClaudeCLI] 실행: claude -p <user({len(user_content)}chars)> "
             f"--system-prompt <sys({len(system_prompt)}chars)> "
-            f"--output-format json (screenshots={len(screenshot_files)})"
+            f"--output-format stream-json (screenshots={len(screenshot_files)})"
         )
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -336,41 +480,91 @@ class ClaudeCLIClient(LLMClientBase):
                 stderr=asyncio.subprocess.PIPE,
                 cwd="/tmp",  # 프로젝트 CLAUDE.md 컨텍스트 격리
             )
-            stdout, stderr = await proc.communicate()
         except OSError as e:
             raise LLMConnectionError(
                 message=f"claude CLI 실행 실패: {e}",
                 code=ErrorCode.INTERNAL_SERVER_ERROR,
             )
 
-        stdout_text = stdout.decode().strip()
-        stderr_text = stderr.decode().strip()
+        # stderr 전체를 백그라운드로 읽어 deadlock 방지
+        stderr_chunks: list = []
+
+        async def _read_stderr() -> None:
+            data = await proc.stderr.read()
+            stderr_chunks.append(data.decode(errors="replace"))
+
+        stderr_task = asyncio.create_task(_read_stderr())
+
+        # stdout을 라인 단위로 실시간 읽기 — [알림: ...] 감지 시 파일에 즉시 저장
+        stdout_lines: list = []
+        result_data: dict = {}
+        _seen_notifies: set = set()
+
+        while True:
+            line_bytes = await proc.stdout.readline()
+            if not line_bytes:
+                break
+            line_str = line_bytes.decode(errors="replace").strip()
+            if not line_str:
+                continue
+            stdout_lines.append(line_str)
+            try:
+                msg = json.loads(line_str)
+            except json.JSONDecodeError:
+                continue
+
+            msg_type = msg.get("type", "")
+
+            if msg_type == "assistant":
+                # assistant 메시지에서 [알림: ...] 실시간 감지 → 알림 파일에 즉시 저장
+                for block in msg.get("message", {}).get("content", []):
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text = block.get("text", "")
+                        for nm in _NOTIFY_PATTERN.finditer(text):
+                            notify = nm.group(1).strip()
+                            if notify and notify not in _seen_notifies:
+                                _seen_notifies.add(notify)
+                                try:
+                                    with open(PROGRESS_NOTIFY_FILE, "a", encoding="utf-8") as _nf:
+                                        _nf.write(
+                                            json.dumps({"text": notify, "ts": time.time()}, ensure_ascii=False) + "\n"
+                                        )
+                                    logger.debug(f"[ClaudeCLI] 중간 알림 기록: {notify}")
+                                except Exception as _we:
+                                    logger.debug(f"[ClaudeCLI] 알림 파일 저장 실패 (무시): {_we}")
+
+            elif msg_type == "result":
+                result_data = msg
+
+        await proc.wait()
+        await stderr_task
+        stderr_text = "".join(stderr_chunks)
+        stdout_text = "\n".join(stdout_lines)
 
         debug_prompt = f"=== SYSTEM_PROMPT ===\n{system_prompt}\n\n=== USER_CONTENT ===\n{user_content}"
         self._dump_debug_log(debug_prompt, stdout_text, stderr_text, proc.returncode)
 
         if proc.returncode != 0:
-            # JSON 응답이 있으면 result 필드에서 실제 오류 메시지 추출
+            # result 메시지가 있으면 그 result 필드에서 오류 메시지 추출
             error_detail = stderr_text or stdout_text
-            try:
-                error_json = json.loads(stdout_text)
-                error_detail = error_json.get("result") or error_detail
-            except json.JSONDecodeError:
-                pass
+            if result_data.get("result"):
+                error_detail = result_data["result"]
             logger.error(f"[ClaudeCLI] 실패 (exit {proc.returncode}): {error_detail}")
             raise LLMServerError(
                 message=f"claude CLI 오류: {error_detail}",
                 code=ErrorCode.INTERNAL_SERVER_ERROR,
             )
 
-        try:
-            result = json.loads(stdout_text)
-        except json.JSONDecodeError:
-            return {"result": stdout_text, "usage": {}}
+        if not result_data:
+            # fallback: stdout 전체를 단일 JSON으로 파싱 시도 (예: 구버전 호환)
+            try:
+                result_data = json.loads(stdout_text)
+            except json.JSONDecodeError:
+                return {"result": stdout_text, "usage": {}}
 
         # is_error: true 는 exit code 0이어도 내용이 오류인 경우
-        if result.get("is_error"):
-            error_msg = result.get("result") or "claude CLI에서 오류 반환"
+        if result_data.get("is_error"):
+            error_msg = result_data.get("result") or "claude CLI에서 오류 반환"
             logger.error(f"[ClaudeCLI] is_error=true: {error_msg}")
             raise LLMServerError(
                 message=f"claude CLI 오류: {error_msg}",
@@ -378,7 +572,7 @@ class ClaudeCLIClient(LLMClientBase):
             )
 
         # 최대 턴 수 도달 여부 확인
-        num_turns = result.get("num_turns") or result.get("turns") or 0
+        num_turns = result_data.get("num_turns") or result_data.get("turns") or 0
         if num_turns:
             if num_turns >= MAX_CLAUDE_CLI_TURNS:
                 logger.error(
@@ -394,7 +588,7 @@ class ClaudeCLIClient(LLMClientBase):
                     f"[ClaudeCLI] 턴 수가 한도에 근접합니다 (num_turns={num_turns}, max={MAX_CLAUDE_CLI_TURNS})"
                 )
 
-        return result
+        return result_data
 
     @staticmethod
     def _dump_debug_log(prompt: str, stdout: str, stderr: str, returncode: Optional[int]) -> None:
