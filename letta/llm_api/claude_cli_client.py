@@ -330,6 +330,11 @@ MEMORY_INSTRUCTIONS = """\
 기존 정보 교체/수정:
 <letta_memory_replace label="LABEL"><old>교체할 기존 텍스트(정확히 일치)</old><new>새로운 텍스트(삭제 시 빈 값)</new></letta_memory_replace>
 
+**⚠️ `<old>` 주의:** 반드시 위 `<persona>`/`<human>` 섹션에 표시된 **현재값**을 기준으로 작성하세요.
+- 실패 시 에러의 "Current block value:" 이후 텍스트가 실제 현재값입니다.
+- **그 텍스트를 그대로 복사해서** `<old>`에 사용하고, 이전 컨텍스트에서 기억한 값은 절대 쓰지 마세요.
+- 재시도 시 추가 텍스트 응답 없이 바로 `letta_memory_replace` 태그만 출력하세요.
+
 === Archival Memory (대용량 장기 저장, 검색으로 조회) ===
 
 저장 (tags는 선택사항, 쉼표 구분):
