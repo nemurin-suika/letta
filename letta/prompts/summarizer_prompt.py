@@ -64,8 +64,11 @@ You MUST include the following sections:
    - Do not omit details likely to be referenced later.
 
 4. **Errors and fixes**: List all errors that you ran into, and how you fixed them. Pay special attention to specific user feedback that you received and record verbatim if useful.
+   - **IMPORTANT**: If a tool call (e.g. core_memory_replace) returned a "Failed" or "error" status, explicitly note whether the underlying task was ultimately completed by a later successful call or by other means. Do NOT leave ambiguous Failed results that would suggest the task still needs to be retried.
 
-5. **Lookup hints**: For any detailed content (long lists, extensive data, specific conversations) that couldn't fit in the summary, note the topic and key terms that could be used to find it in message history later.
+5. **Current core memory state**: Copy the EXACT current values of core memory blocks (persona, human) verbatim. This is critical so that after compaction, core_memory_replace can use the correct old_content without guessing.
+
+6. **Lookup hints**: For any detailed content (long lists, extensive data, specific conversations) that couldn't fit in the summary, note the topic and key terms that could be used to find it in message history later.
 
 Write in first person as a factual record of what occurred. Be thorough and detailed - the goal is to preserve enough context that the recent messages make sense and important information isn't lost to prevent duplicate work or repeated mistakes.
 
@@ -89,12 +92,15 @@ You MUST include the following sections:
    - Do not omit details likely to be referenced later.
 
 4. **Errors and fixes**: List all errors that you ran into, and how you fixed them. Pay special attention to specific user feedback that you received and record verbatim if useful.
+   - **IMPORTANT**: If a tool call (e.g. core_memory_replace) returned a "Failed" or "error" status, explicitly note whether the underlying task was ultimately completed by a later successful call or by other means. Do NOT leave ambiguous Failed results that would suggest the task still needs to be retried.
 
-5. **Current state**:Describe in detail precisely what is currently being worked on, paying special attention to the most recent messages from both user and assistant. Include file names and code snippets where applicable.
+5. **Current core memory state**: Copy the EXACT current values of core memory blocks (persona, human) verbatim. This is critical so that after compaction, core_memory_replace can use the correct old_content without guessing.
 
-6.**Optional Next Step**: List the next step that you will take that is related to the most recent work you were doing. IMPORTANT: ensure that this step is DIRECTLY in line with the user's most recent explicit requests and the most current task. If your last task was concluded, then only list next steps if they are explicitly in line with the users request. If there is a next step, include direct quotes from the most recent conversation showing exactly what task you were working on and where you left off.
+6. **Current state**: Describe in detail precisely what is currently being worked on, paying special attention to the most recent messages from both user and assistant. Include file names and code snippets where applicable.
 
-7. **Lookup hints**: For any detailed content (long lists, extensive data, specific conversations) that couldn't fit in the summary, note the topic and key terms that could be used to find it in message history later.
+7. **Optional Next Step**: List the next step that you will take that is related to the most recent work you were doing. IMPORTANT: ensure that this step is DIRECTLY in line with the user's most recent explicit requests and the most current task. If your last task was concluded, then only list next steps if they are explicitly in line with the users request. If there is a next step, include direct quotes from the most recent conversation showing exactly what task you were working on and where you left off.
+
+8. **Lookup hints**: For any detailed content (long lists, extensive data, specific conversations) that couldn't fit in the summary, note the topic and key terms that could be used to find it in message history later.
 
 Write in first person as a factual record of what occurred. Be concise but thorough - the goal is to preserve enough context that the recent messages make sense and important information isn't lost to prevent duplicate work or repeated mistakes.
 
