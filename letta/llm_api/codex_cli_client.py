@@ -221,6 +221,12 @@ MEMORY_INSTRUCTIONS = """\
 <letta_archival_delete id="passage-323de23a-2b4c-4a73-89f0-88f8c6be2929"/>
 <letta_archival_delete id="passage-a6a1c2ed-f97d-461d-9720-2faad8cf3db2"/>
 
+=== 대화 압축(Compact) 시 주의 ===
+
+대화가 압축될 때 생성되는 요약에 반드시 아래 내용을 포함하세요:
+1. `letta_memory_replace`가 실패로 끝났다면, 이후에 성공했는지 여부를 명확히 기록하세요. "Failed" 기록만 남기면 압축 후 불필요한 재시도를 유발합니다.
+2. 현재 core memory 블록(persona, human)의 실제 내용을 verbatim으로 포함하세요. 압축 후 `letta_memory_replace` 사용 시 정확한 old 값 제공에 필요합니다.
+
 메모리 태그는 응답 맨 끝에만 추가하세요.
 </letta_memory_instructions>"""
 
