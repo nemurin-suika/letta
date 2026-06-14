@@ -1590,14 +1590,20 @@ class LettaAgent(BaseAgent):
             self.logger.warning(
                 f"Total tokens {total_tokens} exceeds configured max tokens {llm_config.context_window}, forcefully clearing message history."
             )
+            # Compress only in_context_messages; exclude new_letta_messages (current step's
+            # assistant/tool_call/tool_return messages) from compression so that the LLM
+            # retains awareness of already-executed tool calls on the next step.
             new_in_context_messages, _updated = await self.summarizer.summarize(
                 in_context_messages=in_context_messages,
-                new_letta_messages=new_letta_messages,
+                new_letta_messages=[],
                 force=True,
                 clear=True,
                 run_id=run_id,
                 step_id=step_id,
             )
+            # Re-append current step messages so the LLM sees what was already done.
+            if new_letta_messages:
+                new_in_context_messages = new_in_context_messages + new_letta_messages
         else:
             # NOTE (Sarah): Seems like this is doing nothing?
             self.logger.info(
