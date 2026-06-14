@@ -63,7 +63,10 @@ class BlockManager:
         agent_ids = await self.get_agent_ids_for_block_async(block_id=block_id, actor=actor)
         for agent_id in agent_ids:
             try:
-                await self.agent_manager.rebuild_system_prompt_async(agent_id=agent_id, actor=actor, force=True, update_timestamp=False)
+                agent_state, _, _, _ = await self.agent_manager.rebuild_system_prompt_async(agent_id=agent_id, actor=actor, force=True, update_timestamp=False)
+                # Also rebuild named conversation system messages (e.g. conversation_id="default")
+                # so they stay in sync with the updated block value.
+                await self.agent_manager._rebuild_conversation_system_messages_async(agent_id=agent_id, agent_state=agent_state, actor=actor)
             except Exception:
                 logger.exception(f"Failed to rebuild system prompt for agent {agent_id} after block {block_id} was updated")
 
