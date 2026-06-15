@@ -371,6 +371,8 @@ MAX_CLAUDE_CLI_TURNS = 60
 
 # 중간 진행 알림 공유 파일 (Open-LLM-VTuber 백엔드가 polling해서 채팅창에 표시)
 PROGRESS_NOTIFY_FILE = "/tmp/mizuki_progress_notify.jsonl"
+# 인터럽트 파일: Open-LLM-VTuber 백엔드가 생성 → 여기서 감지 → proc.kill()
+ABORT_FLAG_FILE = "/tmp/mizuki_abort.flag"
 # claude 응답 텍스트에서 [알림: 내용] 패턴 감지
 _NOTIFY_PATTERN = re.compile(r'\[알림:\s*(.*?)\]', re.DOTALL)
 
@@ -502,6 +504,13 @@ class ClaudeCLIClient(LLMClientBase):
                 code=ErrorCode.INTERNAL_SERVER_ERROR,
             )
 
+        # 이번 호출 시작 시 잔류 abort 파일 초기화
+        try:
+            if os.path.exists(ABORT_FLAG_FILE):
+                os.unlink(ABORT_FLAG_FILE)
+        except Exception:
+            pass
+
         # stderr 전체를 백그라운드로 읽어 deadlock 방지
         stderr_chunks: list = []
 
@@ -511,49 +520,77 @@ class ClaudeCLIClient(LLMClientBase):
 
         stderr_task = asyncio.create_task(_read_stderr())
 
+        # 백그라운드 abort watcher: abort 파일 감지 시 proc 즉시 kill
+        async def _abort_watcher() -> None:
+            while True:
+                await asyncio.sleep(0.3)
+                if os.path.exists(ABORT_FLAG_FILE):
+                    logger.info("[ClaudeCLI] abort 파일 감지 → proc.kill()")
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                    return
+
+        _abort_watch_task = asyncio.create_task(_abort_watcher())
+
         # stdout을 라인 단위로 실시간 읽기 — [알림: ...] 감지 시 파일에 즉시 저장
         stdout_lines: list = []
         result_data: dict = {}
         _seen_notifies: set = set()
 
-        while True:
-            line_bytes = await proc.stdout.readline()
-            if not line_bytes:
-                break
-            line_str = line_bytes.decode(errors="replace").strip()
-            if not line_str:
-                continue
-            stdout_lines.append(line_str)
+        try:
+            while True:
+                line_bytes = await proc.stdout.readline()
+                if not line_bytes:
+                    break
+                line_str = line_bytes.decode(errors="replace").strip()
+                if not line_str:
+                    continue
+                stdout_lines.append(line_str)
+                try:
+                    msg = json.loads(line_str)
+                except json.JSONDecodeError:
+                    continue
+
+                msg_type = msg.get("type", "")
+
+                if msg_type == "assistant":
+                    # assistant 메시지에서 [알림: ...] 실시간 감지 → 알림 파일에 즉시 저장
+                    for block in msg.get("message", {}).get("content", []):
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            text = block.get("text", "")
+                            for nm in _NOTIFY_PATTERN.finditer(text):
+                                notify = nm.group(1).strip()
+                                if notify and notify not in _seen_notifies:
+                                    _seen_notifies.add(notify)
+                                    try:
+                                        with open(PROGRESS_NOTIFY_FILE, "a", encoding="utf-8") as _nf:
+                                            _nf.write(
+                                                json.dumps({"text": notify, "ts": time.time()}, ensure_ascii=False) + "\n"
+                                            )
+                                        logger.debug(f"[ClaudeCLI] 중간 알림 기록: {notify}")
+                                    except Exception as _we:
+                                        logger.debug(f"[ClaudeCLI] 알림 파일 저장 실패 (무시): {_we}")
+
+                elif msg_type == "result":
+                    result_data = msg
+
+            await proc.wait()
+            await stderr_task
+        finally:
+            # abort watcher 정리 + abort 파일 삭제
+            _abort_watch_task.cancel()
             try:
-                msg = json.loads(line_str)
-            except json.JSONDecodeError:
-                continue
+                await _abort_watch_task
+            except asyncio.CancelledError:
+                pass
+            try:
+                if os.path.exists(ABORT_FLAG_FILE):
+                    os.unlink(ABORT_FLAG_FILE)
+            except Exception:
+                pass
 
-            msg_type = msg.get("type", "")
-
-            if msg_type == "assistant":
-                # assistant 메시지에서 [알림: ...] 실시간 감지 → 알림 파일에 즉시 저장
-                for block in msg.get("message", {}).get("content", []):
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        text = block.get("text", "")
-                        for nm in _NOTIFY_PATTERN.finditer(text):
-                            notify = nm.group(1).strip()
-                            if notify and notify not in _seen_notifies:
-                                _seen_notifies.add(notify)
-                                try:
-                                    with open(PROGRESS_NOTIFY_FILE, "a", encoding="utf-8") as _nf:
-                                        _nf.write(
-                                            json.dumps({"text": notify, "ts": time.time()}, ensure_ascii=False) + "\n"
-                                        )
-                                    logger.debug(f"[ClaudeCLI] 중간 알림 기록: {notify}")
-                                except Exception as _we:
-                                    logger.debug(f"[ClaudeCLI] 알림 파일 저장 실패 (무시): {_we}")
-
-            elif msg_type == "result":
-                result_data = msg
-
-        await proc.wait()
-        await stderr_task
         stderr_text = "".join(stderr_chunks)
         stdout_text = "\n".join(stdout_lines)
 
@@ -561,6 +598,13 @@ class ClaudeCLIClient(LLMClientBase):
         self._dump_debug_log(debug_prompt, stdout_text, stderr_text, proc.returncode)
 
         if proc.returncode != 0:
+            # 시그널로 종료(SIGKILL=-9 등) → abort로 처리 → 빈 응답 반환
+            if proc.returncode < 0:
+                logger.info(
+                    f"[ClaudeCLI] proc이 시그널로 종료됨 (returncode={proc.returncode}) "
+                    f"— 사용자 인터럽트로 처리, 빈 응답 반환"
+                )
+                return {"result": "", "usage": {}}
             # result 메시지가 있으면 그 result 필드에서 오류 메시지 추출
             error_detail = stderr_text or stdout_text
             if result_data.get("result"):
