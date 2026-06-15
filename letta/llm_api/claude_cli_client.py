@@ -881,8 +881,19 @@ class ClaudeCLIClient(LLMClientBase):
                 last_user_idx = i
                 break
 
-        history_msgs = non_system[:last_user_idx] if last_user_idx >= 0 else non_system
-        current_msg = non_system[last_user_idx] if last_user_idx >= 0 else None
+        # last_user_idx 이후에 assistant/tool 메시지가 있으면 (tool call 처리 후 재호출)
+        # 해당 메시지들을 history에 포함해야 함. 그렇지 않으면 LLM이 tool 실행 결과를
+        # 알 수 없어 같은 tool call을 반복하는 루프가 발생함.
+        if last_user_idx >= 0 and last_user_idx < len(non_system) - 1:
+            # last_user 이후 메시지 있음 → 전체를 history, current_input 없음
+            history_msgs = non_system
+            current_msg = None
+        elif last_user_idx >= 0:
+            history_msgs = non_system[:last_user_idx]
+            current_msg = non_system[last_user_idx]
+        else:
+            history_msgs = non_system
+            current_msg = None
 
         # history 직렬화 — XML 태그로 감싸서 transcript 패턴 회피
         history_parts: List[str] = []
