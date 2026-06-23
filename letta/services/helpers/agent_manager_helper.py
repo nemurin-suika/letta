@@ -1202,14 +1202,24 @@ async def build_agent_passage_query(
     if embed_query and embedding_config is not None:
         assert query_text is not None, "query_text must be specified for vector search"
 
-        # Use the new LLMClient for embeddings
-        embedding_client = LLMClient.create(
-            provider_type=embedding_config.embedding_endpoint_type,
-            actor=actor,
-        )
-        embeddings = await embedding_client.request_embeddings([query_text], embedding_config)
-        embedded_text = np.array(embeddings[0])
-        embedded_text = np.pad(embedded_text, (0, MAX_EMBEDDING_DIM - embedded_text.shape[0]), mode="constant").tolist()
+        try:
+            # Use the new LLMClient for embeddings
+            embedding_client = LLMClient.create(
+                provider_type=embedding_config.embedding_endpoint_type,
+                actor=actor,
+            )
+            embeddings = await embedding_client.request_embeddings([query_text], embedding_config)
+            embedded_text = np.array(embeddings[0])
+            embedded_text = np.pad(embedded_text, (0, MAX_EMBEDDING_DIM - embedded_text.shape[0]), mode="constant").tolist()
+        except Exception as emb_err:
+            # embedding 서버 실패 시 SQL text search로 폴백
+            # (예: ollama 서버 timeout, 모델 로딩 지연 등)
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                f"Embedding generation failed for archival search, falling back to SQL text search: "
+                f"{type(emb_err).__name__}: {emb_err}"
+            )
+            embedded_text = None
 
     # Base query for passages - use noload to prevent lazy loading which can block the event loop
     if agent_id:

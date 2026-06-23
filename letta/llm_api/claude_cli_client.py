@@ -790,6 +790,8 @@ class ClaudeCLIClient(LLMClientBase):
             )
 
         # archival_memory_search 태그 처리
+        # request_heartbeat=True 필수: letta가 검색 실행 후 continue_stepping=True가 되어야
+        # 결과를 다시 claude에 전달함. 없으면 결과가 유실되고 대화가 조기 종료됨.
         for match in _ARCHIVAL_SEARCH_RE.finditer(text):
             attrs = {m.group(1): m.group(2) for m in _ATTR_RE.finditer(match.group(1))}
             query = match.group(2).strip()
@@ -797,7 +799,7 @@ class ClaudeCLIClient(LLMClientBase):
             tags_str = attrs.get("tags", "")
             top_k = int(top_k_str) if top_k_str.isdigit() else None
             tags = [t.strip() for t in tags_str.split(",") if t.strip()] if tags_str else None
-            args = {"query": query}
+            args: dict = {"query": query, "request_heartbeat": True}
             if top_k:
                 args["top_k"] = top_k
             if tags:
