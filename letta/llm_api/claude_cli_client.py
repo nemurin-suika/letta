@@ -365,10 +365,6 @@ MEMORY_INSTRUCTIONS = """\
 </letta_memory_instructions>"""
 
 
-# claude -p 한 번의 호출 안에서 Claude가 수행할 수 있는 최대 agentic 턴 수.
-# 기억 압축/저장 루프가 무한 반복되는 상황을 방지한다.
-MAX_CLAUDE_CLI_TURNS = 60
-
 # 중간 진행 알림 공유 파일 (Open-LLM-VTuber 백엔드가 polling해서 채팅창에 표시)
 PROGRESS_NOTIFY_FILE = "/tmp/mizuki_progress_notify.jsonl"
 # 인터럽트 파일: Open-LLM-VTuber 백엔드가 생성 → 여기서 감지 → proc.kill()
@@ -470,7 +466,6 @@ class ClaudeCLIClient(LLMClientBase):
             "--output-format", "stream-json",  # 실시간 스트리밍으로 중간 알림 감지
             "--verbose",  # -p + stream-json 조합은 --verbose 필수 (없으면 CLI가 거부)
             "--allowedTools", allowed_tools,
-            "--max-turns", str(MAX_CLAUDE_CLI_TURNS),
         ]
         if model and model != "claude-cli":
             cmd.extend(["--model", model])
@@ -630,23 +625,6 @@ class ClaudeCLIClient(LLMClientBase):
                 message=f"claude CLI 오류: {error_msg}",
                 code=ErrorCode.INTERNAL_SERVER_ERROR,
             )
-
-        # 최대 턴 수 도달 여부 확인
-        num_turns = result_data.get("num_turns") or result_data.get("turns") or 0
-        if num_turns:
-            if num_turns >= MAX_CLAUDE_CLI_TURNS:
-                logger.error(
-                    f"[ClaudeCLI] 최대 턴 수({MAX_CLAUDE_CLI_TURNS}) 도달 — 무한 루프 방지로 중단합니다. "
-                    f"(num_turns={num_turns})"
-                )
-                raise LLMServerError(
-                    message=f"claude CLI 최대 턴 수({MAX_CLAUDE_CLI_TURNS}) 초과: 무한 루프 방지로 중단됨",
-                    code=ErrorCode.INTERNAL_SERVER_ERROR,
-                )
-            elif num_turns >= MAX_CLAUDE_CLI_TURNS * 0.8:
-                logger.warning(
-                    f"[ClaudeCLI] 턴 수가 한도에 근접합니다 (num_turns={num_turns}, max={MAX_CLAUDE_CLI_TURNS})"
-                )
 
         return result_data
 
