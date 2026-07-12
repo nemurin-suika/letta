@@ -52,7 +52,7 @@ async def add_keepalive_to_stream(
     stream_generator: AsyncIterator[str | bytes],
     run_id: str,
     keepalive_interval: float = 30.0,
-    max_stream_silence: float = 3600.0,
+    max_stream_silence: float = 7200.0,
 ) -> AsyncIterator[str | bytes]:
     """
     Adds periodic keepalive messages to a stream to prevent connection timeouts.
@@ -68,7 +68,7 @@ async def add_keepalive_to_stream(
     Args:
         stream_generator: The original stream generator to wrap
         keepalive_interval: Seconds between keepalive messages (default: 30)
-        max_stream_silence: Maximum seconds with no stream data before terminating (default: 3600)
+        max_stream_silence: Maximum seconds with no stream data before terminating (default: 7200)
 
     Yields:
         Original stream chunks interspersed with keepalive messages
