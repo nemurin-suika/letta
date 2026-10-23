@@ -369,6 +369,48 @@ MEMORY_INSTRUCTIONS = """\
 PROGRESS_NOTIFY_FILE = "/tmp/mizuki_progress_notify.jsonl"
 # 인터럽트 파일: Open-LLM-VTuber 백엔드가 생성 → 여기서 감지 → proc.kill()
 ABORT_FLAG_FILE = "/tmp/mizuki_abort.flag"
+
+# ── 다중 세션(letta conversation) 대응 ──────────────────────────────────────
+# 세션이 여러 개 동시에 돌 때 위 고정 경로를 공유하면
+#   (1) 중간 알림이 다른 세션 채팅창에 섞여 뜨고
+#   (2) 한 세션의 인터럽트가 다른 세션의 claude -p subprocess까지 kill한다.
+# 시스템 프롬프트에 주입되는 "- CONVERSATION_ID: xxx" 값을 세션 키로 삼아 파일을 분리한다.
+# default 세션(기존 단일 세션 경로)은 하위 호환을 위해 기존 경로를 그대로 사용한다.
+DEFAULT_SESSION_KEY = "default"
+_CONVERSATION_ID_RE = re.compile(r"CONVERSATION_ID:\s*([^\s\n]+)")
+_SESSION_KEY_UNSAFE_RE = re.compile(r"[^A-Za-z0-9_-]")
+
+
+def sanitize_session_key(raw: Optional[str]) -> str:
+    """임의 문자열 → 파일명에 쓸 수 있는 세션 키. 비거나 실패 시 default."""
+    if not raw:
+        return DEFAULT_SESSION_KEY
+    key = _SESSION_KEY_UNSAFE_RE.sub("_", str(raw).strip())[:64]
+    return key or DEFAULT_SESSION_KEY
+
+
+def extract_session_key(system_prompt: Optional[str]) -> str:
+    """시스템 프롬프트의 CONVERSATION_ID 메타데이터에서 세션 키를 추출."""
+    match = _CONVERSATION_ID_RE.search(system_prompt or "")
+    return sanitize_session_key(match.group(1) if match else None)
+
+
+def progress_notify_file(session_key: str = DEFAULT_SESSION_KEY) -> str:
+    """세션별 중간 알림 파일 경로."""
+    key = sanitize_session_key(session_key)
+    if key == DEFAULT_SESSION_KEY:
+        return PROGRESS_NOTIFY_FILE
+    return f"/tmp/mizuki_progress_notify_{key}.jsonl"
+
+
+def abort_flag_file(session_key: str = DEFAULT_SESSION_KEY) -> str:
+    """세션별 인터럽트 플래그 파일 경로."""
+    key = sanitize_session_key(session_key)
+    if key == DEFAULT_SESSION_KEY:
+        return ABORT_FLAG_FILE
+    return f"/tmp/mizuki_abort_{key}.flag"
+
+
 # claude 응답 텍스트에서 [알림: 내용] 패턴 감지
 _NOTIFY_PATTERN = re.compile(r'\[알림:\s*(.*?)\]', re.DOTALL)
 
@@ -423,6 +465,8 @@ class ClaudeCLIClient(LLMClientBase):
             "user_content": user_content,
             "model": llm_config.model or "",
             "screenshot_files": screenshot_files,
+            # 다중 세션: 알림/인터럽트 파일을 conversation 단위로 분리하기 위한 키
+            "session_key": extract_session_key(system_prompt),
         }
 
     # ---------------------------------------------------------------------------
@@ -447,13 +491,19 @@ class ClaudeCLIClient(LLMClientBase):
         user_content = request_data["user_content"]
         model = request_data.get("model", "")
         screenshot_files: list = request_data.get("screenshot_files", [])
+        # 다중 세션: 이 호출이 속한 conversation 전용 알림/인터럽트 파일 경로
+        session_key = sanitize_session_key(
+            request_data.get("session_key") or extract_session_key(system_prompt)
+        )
+        notify_file = progress_notify_file(session_key)
+        abort_file = abort_flag_file(session_key)
 
         # Claude Code 사용량 캐시 갱신 (백그라운드, 실패 시 무시) — 프론트 프로그레스 바용
         asyncio.create_task(_fetch_claude_usage_async())
 
         # 중간 알림 파일 초기화 (이번 호출의 알림만 담도록 매번 비움)
         try:
-            with open(PROGRESS_NOTIFY_FILE, "w", encoding="utf-8") as _nf:
+            with open(notify_file, "w", encoding="utf-8") as _nf:
                 pass
         except Exception:
             pass
@@ -501,8 +551,8 @@ class ClaudeCLIClient(LLMClientBase):
 
         # 이번 호출 시작 시 잔류 abort 파일 초기화
         try:
-            if os.path.exists(ABORT_FLAG_FILE):
-                os.unlink(ABORT_FLAG_FILE)
+            if os.path.exists(abort_file):
+                os.unlink(abort_file)
         except Exception:
             pass
 
@@ -519,8 +569,8 @@ class ClaudeCLIClient(LLMClientBase):
         async def _abort_watcher() -> None:
             while True:
                 await asyncio.sleep(0.3)
-                if os.path.exists(ABORT_FLAG_FILE):
-                    logger.info("[ClaudeCLI] abort 파일 감지 → proc.kill()")
+                if os.path.exists(abort_file):
+                    logger.info(f"[ClaudeCLI] abort 파일 감지 → proc.kill() (session={session_key})")
                     try:
                         proc.kill()
                     except Exception:
@@ -560,7 +610,7 @@ class ClaudeCLIClient(LLMClientBase):
                                 if notify and notify not in _seen_notifies:
                                     _seen_notifies.add(notify)
                                     try:
-                                        with open(PROGRESS_NOTIFY_FILE, "a", encoding="utf-8") as _nf:
+                                        with open(notify_file, "a", encoding="utf-8") as _nf:
                                             _nf.write(
                                                 json.dumps({"text": notify, "ts": time.time()}, ensure_ascii=False) + "\n"
                                             )
@@ -581,8 +631,8 @@ class ClaudeCLIClient(LLMClientBase):
             except asyncio.CancelledError:
                 pass
             try:
-                if os.path.exists(ABORT_FLAG_FILE):
-                    os.unlink(ABORT_FLAG_FILE)
+                if os.path.exists(abort_file):
+                    os.unlink(abort_file)
             except Exception:
                 pass
 
