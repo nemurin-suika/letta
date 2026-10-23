@@ -49,13 +49,16 @@ if [ "$MODE" = "local" ]; then
         echo "[Claude] ERROR: 'claude' CLI를 찾을 수 없습니다. Claude Code CLI를 설치하세요."
         exit 1
     fi
-    _CLAUDE_OUT=$(claude -p "ping" --output-format json 2>/dev/null)
-    if echo "$_CLAUDE_OUT" | grep -qi "not logged in"; then
-        echo "[Claude] 로그인이 필요합니다..."
-        claude login
-        echo "[Claude] 로그인 완료"
-    else
+    # `claude -p "ping"`은 stdin이 TTY면 EOF를 기다리며 hang된다. 게다가 실제 API 호출이라
+    # 매 기동마다 CLAUDE.md 전체가 컨텍스트로 올라가 수 초 + 실비가 나간다.
+    # `claude auth status --json`은 네트워크/토큰 소모 없이 즉시 로그인 여부만 반환한다.
+    _CLAUDE_AUTH=$(claude auth status --json </dev/null 2>/dev/null)
+    if echo "$_CLAUDE_AUTH" | grep -q '"loggedIn"[[:space:]]*:[[:space:]]*true'; then
         echo "[Claude] 로그인 확인됨"
+    else
+        echo "[Claude] 로그인이 필요합니다..."
+        claude auth login
+        echo "[Claude] 로그인 완료"
     fi
 
     # ── PostgreSQL 시작 (Homebrew 네이티브) ────────────────────────────────
@@ -147,17 +150,17 @@ else
     _CLAUDE_AUTH_OUT=$(docker run --rm \
       -v letta-claude-auth:/root/.claude \
       letta/letta:nemurin \
-      claude -p "ping" --output-format json 2>/dev/null)
+      claude auth status --json 2>/dev/null)
 
-    if echo "$_CLAUDE_AUTH_OUT" | grep -qi "not logged in"; then
+    if echo "$_CLAUDE_AUTH_OUT" | grep -q '"loggedIn"[[:space:]]*:[[:space:]]*true'; then
+        echo "[Claude] 로그인 확인됨"
+    else
         echo "[Claude] 로그인이 필요합니다. 브라우저 인증을 진행합니다..."
         docker run --rm -it \
           -v letta-claude-auth:/root/.claude \
           letta/letta:nemurin \
-          claude login
+          claude auth login
         echo "[Claude] 로그인 완료"
-    else
-        echo "[Claude] 로그인 확인됨"
     fi
 
     # --add-host=host.docker.internal:host-gateway
