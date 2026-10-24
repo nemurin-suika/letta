@@ -540,12 +540,18 @@ class ClaudeCLIClient(LLMClientBase):
             f"--system-prompt <sys({len(system_prompt)}chars)> "
             f"--output-format stream-json (screenshots={len(screenshot_files)})"
         )
+        # 다중 세션: PreToolUse hook(= claude -p 의 자식 프로세스)이 "이 승인 요청이
+        # 어느 세션 것인지" 알 수 있도록 세션 키를 환경변수로 상속시킨다. hook은 이 값을
+        # 승인 payload 에 실어 백엔드로 보내고, 백엔드가 세션 이름으로 바꿔 팝업에 표시한다.
+        child_env = {**os.environ, "MIZUKI_SESSION_KEY": session_key}
+
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd="/tmp",  # 프로젝트 CLAUDE.md 컨텍스트 격리
+                env=child_env,
                 # stream-json 한 이벤트(줄)가 기본 64KB 한계를 넘으면 readline이
                 # "Separator is not found, and chunk exceed the limit"로 터진다.
                 # 큰 파일 Read 결과/긴 assistant 텍스트 대비 버퍼를 64MB로 확대.
