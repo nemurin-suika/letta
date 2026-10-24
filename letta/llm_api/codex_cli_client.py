@@ -14,6 +14,7 @@ import uuid
 from typing import TYPE_CHECKING, List, Optional, Tuple
 
 from letta.errors import ErrorCode, LLMBadRequestError, LLMConnectionError, LLMError, LLMServerError
+from letta.llm_api.claude_cli_client import extract_session_key, intent_file, sanitize_session_key
 from letta.llm_api.llm_client_base import LLMClientBase
 from letta.log import get_logger
 from letta.schemas.enums import AgentType
@@ -319,6 +320,12 @@ class CodexCLIClient(LLMClientBase):
         user_content = request_data["user_content"]
         model = request_data.get("model", "")
         screenshot_files: list = request_data.get("screenshot_files", [])
+        # 다중 세션: claude_cli_client 와 완전히 같은 규칙으로 세션 키를 구한다.
+        # codex 의 자식 프로세스(툴 승인 hook 등)가 "이 요청이 어느 세션 것인지"와
+        # "의도 문구를 어느 파일에서 읽어야 하는지"를 env 로 상속받게 한다.
+        session_key = sanitize_session_key(
+            request_data.get("session_key") or extract_session_key(system_prompt)
+        )
 
         output_path = f"/tmp/codex_cli_last_message_{uuid.uuid4().hex}.txt"
         prompt_text = (
@@ -352,6 +359,11 @@ class CodexCLIClient(LLMClientBase):
             f"--model {model or '<default>'} (screenshots={len(screenshot_files)})"
         )
         TIMEOUT_SECONDS = 300  # 5분
+        child_env = {
+            **os.environ,
+            "MIZUKI_SESSION_KEY": session_key,
+            "MIZUKI_INTENT_FILE": intent_file(session_key),
+        }
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -359,6 +371,7 @@ class CodexCLIClient(LLMClientBase):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd="/tmp",  # 프로젝트 AGENTS.md/CLAUDE.md 컨텍스트 격리
+                env=child_env,
             )
             try:
                 stdout, stderr = await asyncio.wait_for(

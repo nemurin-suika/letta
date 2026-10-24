@@ -377,6 +377,10 @@ MEMORY_INSTRUCTIONS = """\
 PROGRESS_NOTIFY_FILE = "/tmp/mizuki_progress_notify.jsonl"
 # 인터럽트 파일: Open-LLM-VTuber 백엔드가 생성 → 여기서 감지 → proc.kill()
 ABORT_FLAG_FILE = "/tmp/mizuki_abort.flag"
+# 툴 승인 팝업 의도({의도} 한 줄) 공유 파일.
+# Open-LLM-VTuber 백엔드의 letta_agent.py 가 쓰고, claude -p 의 PreToolUse hook
+# (scripts/claude_tool_approval_hook.py)이 MIZUKI_INTENT_FILE env 로 받아 읽는다.
+INTENT_FILE = "/tmp/mizuki_last_reasoning.json"
 
 # ── 다중 세션(letta conversation) 대응 ──────────────────────────────────────
 # 세션이 여러 개 동시에 돌 때 위 고정 경로를 공유하면
@@ -417,6 +421,18 @@ def abort_flag_file(session_key: str = DEFAULT_SESSION_KEY) -> str:
     if key == DEFAULT_SESSION_KEY:
         return ABORT_FLAG_FILE
     return f"/tmp/mizuki_abort_{key}.flag"
+
+
+def intent_file(session_key: str = DEFAULT_SESSION_KEY) -> str:
+    """세션별 툴 승인 의도 파일 경로.
+
+    단일 파일을 공유하면 두 세션이 동시에 도는 동안 A 세션의 {의도} 가
+    B 세션 승인 팝업에 뜰 수 있다. 알림/인터럽트와 같은 규칙으로 분리한다.
+    """
+    key = sanitize_session_key(session_key)
+    if key == DEFAULT_SESSION_KEY:
+        return INTENT_FILE
+    return f"/tmp/mizuki_last_reasoning_{key}.json"
 
 
 # claude 응답 텍스트에서 [알림: 내용] 패턴 감지
@@ -543,7 +559,13 @@ class ClaudeCLIClient(LLMClientBase):
         # 다중 세션: PreToolUse hook(= claude -p 의 자식 프로세스)이 "이 승인 요청이
         # 어느 세션 것인지" 알 수 있도록 세션 키를 환경변수로 상속시킨다. hook은 이 값을
         # 승인 payload 에 실어 백엔드로 보내고, 백엔드가 세션 이름으로 바꿔 팝업에 표시한다.
-        child_env = {**os.environ, "MIZUKI_SESSION_KEY": session_key}
+        # MIZUKI_INTENT_FILE: 승인 팝업에 표시할 {의도} 한 줄도 세션별 파일에서만
+        # 읽게 한다. 단일 파일이면 동시 실행 중인 다른 세션의 의도가 섞여 뜬다.
+        child_env = {
+            **os.environ,
+            "MIZUKI_SESSION_KEY": session_key,
+            "MIZUKI_INTENT_FILE": intent_file(session_key),
+        }
 
         try:
             proc = await asyncio.create_subprocess_exec(
