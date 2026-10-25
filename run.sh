@@ -9,7 +9,12 @@ GEMINI_API_KEYS="$(IFS=,; echo "${GEMINI_KEYS[*]}")"
 LLM_FALLBACK_CONFIG='{"model": "claude-cli", "model_endpoint_type": "claude_cli", "context_window": 72000}'
 
 PG_BIN="/opt/homebrew/opt/postgresql@17/bin"
-PG_DATA="$HOME/OneDrive/ai/memory/pgdata"
+# ★ 데이터 경로는 OneDrive 밖(로컬)이어야 한다 ★
+# launchd 로 기동되는 프로세스는 OneDrive 파일 제공자 영역을 읽을 수 없다.
+#   pg_ctl -D <OneDrive 경로> status  → 영구 블록(응답 없음) 실측 확인
+# 그래서 pgdata/LETTA_DIR 은 ~/.mizuki 아래로 옮기고, OneDrive 에는
+# 1시간 주기 pg_dump 백업만 올린다(moe.nemurin.mizuki-backup).
+PG_DATA="${MIZUKI_PG_DATA:-$HOME/.mizuki/pgdata}"
 PG_USER="postgres"
 PG_PASSWORD="postgres"
 PG_DB="postgres"
@@ -118,7 +123,7 @@ if [ "$MODE" = "local" ]; then
     echo "[Letta] 워커 수: ${_WORKERS}"
 
     # ── Letta 서버 시작 ─────────────────────────────────────────────────────
-    export LETTA_DIR="${HOME}/OneDrive/ai/memory/letta"
+    export LETTA_DIR="${MIZUKI_LETTA_DIR:-${HOME}/.mizuki/letta}"
     mkdir -p "$LETTA_DIR"
     export GEMINI_API_KEY="$GEMINI_API_KEY"
     export GEMINI_API_KEYS="$GEMINI_API_KEYS"
