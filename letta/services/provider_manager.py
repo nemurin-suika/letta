@@ -580,7 +580,26 @@ class ProviderManager:
                     )
 
                     if existing_providers:
-                        logger.debug(f"Base provider '{provider.name}' already exists in database, skipping")
+                        existing_provider = existing_providers[0]
+                        update_fields = {
+                            "provider_type": provider.provider_type,
+                            "base_url": provider.base_url,
+                            "region": provider.region,
+                            "api_version": provider.api_version,
+                        }
+                        changed_fields = []
+                        for field, value in update_fields.items():
+                            if getattr(existing_provider, field) != value:
+                                setattr(existing_provider, field, value)
+                                changed_fields.append(field)
+
+                        if changed_fields:
+                            await existing_provider.update_async(session, actor=actor)
+                            logger.info(
+                                f"Updated base provider '{provider.name}' config fields: {', '.join(changed_fields)}"
+                            )
+                        else:
+                            logger.debug(f"Base provider '{provider.name}' already exists in database, skipping")
                         continue
 
                     # Convert Provider to ProviderCreate
@@ -1146,12 +1165,18 @@ class ProviderManager:
 
         # Get the provider for this model
         provider = await self.get_provider_async(provider_id=model.provider_id, actor=actor)
+        typed_provider = provider.cast_to_subtype()
+        embedding_endpoint = (
+            typed_provider.openai_compat_base_url
+            if hasattr(typed_provider, "openai_compat_base_url")
+            else provider.base_url or f"https://api.{provider.provider_type.value}.com/v1"
+        )
 
         # Construct the EmbeddingConfig from the model and provider data
         embedding_config = EmbeddingConfig(
             embedding_model=model.name,
             embedding_endpoint_type=model.model_endpoint_type,
-            embedding_endpoint=provider.base_url or f"https://api.{provider.provider_type.value}.com/v1",
+            embedding_endpoint=embedding_endpoint,
             embedding_dim=model.embedding_dim or 1536,  # Use model's dimension or default
             embedding_chunk_size=300,  # Default chunk size
             handle=model.handle,

@@ -14,7 +14,13 @@ import uuid
 from typing import TYPE_CHECKING, List, Optional, Tuple
 
 from letta.errors import ErrorCode, LLMBadRequestError, LLMConnectionError, LLMError, LLMServerError
-from letta.llm_api.claude_cli_client import extract_session_key, intent_file, sanitize_session_key
+from letta.llm_api.claude_cli_client import (
+    abort_flag_file,
+    extract_session_key,
+    intent_file,
+    progress_notify_file,
+    sanitize_session_key,
+)
 from letta.llm_api.llm_client_base import LLMClientBase
 from letta.log import get_logger
 from letta.schemas.enums import AgentType
@@ -69,6 +75,160 @@ _YOUTUBE_RE = re.compile(r"\[유튜브 링크\](.*?)\[/유튜브 링크\]", re.D
 _IMAGE_LINK_RE = re.compile(r"\[이미지 링크\](.*?)\[/이미지 링크\]", re.DOTALL)
 _WEB_LINK_RE = re.compile(r"\[웹 링크\](.*?)\[/웹 링크\]", re.DOTALL)
 _SCREENSHOT_RE = re.compile(r"\[스크린샷([^\]]*)\](.*?)\[/스크린샷\]", re.DOTALL)
+_SCREENSHOT_FILE_RE = re.compile(
+    r"Read 툴로 (/tmp/claude_(?:screenshot|yt_frame)_[A-Za-z0-9_]+\.(?:jpe?g|png|webp|gif)) 파일을",
+    re.IGNORECASE,
+)
+
+# codex 응답 텍스트에서 [알림: 내용] 패턴 감지
+_NOTIFY_PATTERN = re.compile(r'\[알림:\s*(.*?)\]', re.DOTALL)
+
+_CODEX_APPROVAL_HOOK = (
+    "python3 ~/ai/Open-LLM-VTuber-v1.2.1-en/scripts/claude_tool_approval_hook.py"
+)
+_CODEX_HOOKS_JSON = {
+    "hooks": {
+        "PreToolUse": [
+            {
+                "matcher": "*",
+                "hooks": [{"type": "command", "command": _CODEX_APPROVAL_HOOK, "timeout": 330}],
+            }
+        ],
+        "PermissionRequest": [
+            {
+                "matcher": "*",
+                "hooks": [{"type": "command", "command": _CODEX_APPROVAL_HOOK, "timeout": 330}],
+            }
+        ],
+    }
+}
+_CODEX_EXEC_ROOT = os.environ.get("VTUBER_CODEX_EXEC_ROOT", "~/ai")
+_CODEX_SANDBOX = os.environ.get("VTUBER_CODEX_SANDBOX", "danger-full-access")
+
+
+def _sanitized_codex_config(raw: str) -> str:
+    """Copy Codex config while dropping hook trust state and deprecated hook key."""
+    lines = []
+    skip_hook_state = False
+    saw_features = False
+    saw_hooks_feature = False
+
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            skip_hook_state = stripped == "[hooks.state]" or stripped.startswith("[hooks.state.")
+            if skip_hook_state:
+                continue
+            if stripped == "[features]":
+                saw_features = True
+            lines.append(line)
+            continue
+        if skip_hook_state:
+            continue
+        if stripped.startswith("codex_hooks"):
+            lines.append("hooks = true")
+            saw_hooks_feature = True
+            continue
+        if stripped.startswith("hooks"):
+            saw_hooks_feature = True
+        lines.append(line)
+
+    if not saw_features:
+        lines.extend(["", "[features]", "hooks = true"])
+    elif not saw_hooks_feature:
+        lines.append("hooks = true")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _prepare_codex_home() -> str:
+    """Build a per-call CODEX_HOME with real provider config and only the VTuber approval hook."""
+    real_home = os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
+    temp_home = os.path.join("/tmp", f"letta_codex_home_{uuid.uuid4().hex}")
+    os.makedirs(temp_home, exist_ok=True)
+
+    config_path = os.path.join(real_home, "config.toml")
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            config_text = _sanitized_codex_config(f.read())
+    except OSError:
+        config_text = "[features]\nhooks = true\n"
+    with open(os.path.join(temp_home, "config.toml"), "w", encoding="utf-8") as f:
+        f.write(config_text)
+    with open(os.path.join(temp_home, "hooks.json"), "w", encoding="utf-8") as f:
+        json.dump(_CODEX_HOOKS_JSON, f, ensure_ascii=False, indent=2)
+    return temp_home
+
+
+def _short_progress_value(value: object, limit: int = 160) -> str:
+    """Return a compact one-line value for progress notifications."""
+    text = str(value or "")
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > limit:
+        return text[: limit - 3].rstrip() + "..."
+    return text
+
+
+def _codex_explanation_text(text: str) -> str:
+    """Keep assistant tool preambles readable in the progress feed."""
+    text = _NOTIFY_PATTERN.sub("", text)
+    text = re.sub(
+        r"\[(?:중립|즐거움|신남|놀람|슬픔|화남|뚱함|look_[a-z]+|volume_(?:up|down))\]",
+        "",
+        text,
+    )
+    return _short_progress_value(text, limit=300)
+
+
+def _append_progress_notify(notify_file: str, text: str, seen: set, source: str = "codex") -> bool:
+    """Append a progress notification once per Codex invocation."""
+    text = text.strip()
+    if not text or text in seen:
+        return False
+    seen.add(text)
+    try:
+        with open(notify_file, "a", encoding="utf-8") as _nf:
+            _nf.write(
+                json.dumps({"text": text, "ts": time.time(), "source": source}, ensure_ascii=False) + "\n"
+            )
+        logger.debug(f"[CodexCLI] 중간 알림 기록: {text}")
+        return True
+    except Exception as _we:
+        logger.debug(f"[CodexCLI] 알림 파일 저장 실패 (무시): {_we}")
+        return False
+
+
+def _codex_item_progress_text(item: dict, event: str) -> Optional[str]:
+    """Translate Codex JSONL item events into user-facing progress text."""
+    item_type = item.get("type", "")
+
+    if item_type == "command_execution":
+        command = _short_progress_value(item.get("command"))
+        if event == "started":
+            return f"명령 실행 중: {command}" if command else "명령 실행 중"
+        if event == "completed":
+            exit_code = item.get("exit_code")
+            if exit_code not in (None, 0):
+                return f"명령 실패(exit {exit_code}): {command}" if command else f"명령 실패(exit {exit_code})"
+        return None
+
+    if event != "started":
+        return None
+
+    if item_type in {"web_search", "web_search_call", "search"}:
+        query = _short_progress_value(item.get("query") or item.get("search_query") or item.get("text"))
+        return f"웹 검색 중: {query}" if query else "웹 검색 중"
+
+    if item_type in {"web_fetch", "browser_open"}:
+        url = _short_progress_value(item.get("url") or item.get("href"))
+        return f"웹 페이지 확인 중: {url}" if url else "웹 페이지 확인 중"
+
+    if item_type in {"mcp_tool_call", "tool_call", "function_call"}:
+        name = _short_progress_value(
+            item.get("name") or item.get("tool_name") or item.get("function_name") or item.get("command")
+        )
+        return f"도구 실행 중: {name}" if name else "도구 실행 중"
+
+    return None
 
 
 def _expand_youtube_links(text: str) -> str:
@@ -129,8 +289,10 @@ def _expand_screenshots(text: str) -> str:
         source_label = {
             "screen": "화면",
             "camera": "카메라",
+            "clipboard": "클립보드 이미지",
+            "upload": "업로드 이미지",
             "youtube_frame": "유튜브 영상 프레임",
-        }.get(source, "화면")
+        }.get(source, "이미지")
 
         # 시간 라벨 결정
         if ago is None or source == "camera":
@@ -142,11 +304,18 @@ def _expand_screenshots(text: str) -> str:
             ago_str = f"{int(ago)}" if ago == int(ago) else f"{ago:g}"
             time_prefix = f"{ago_str}초 전"
 
-        full_label = f"{time_prefix} {source_label}"
+        if source in {"upload", "clipboard"}:
+            full_label = source_label
+        else:
+            full_label = f"{time_prefix} {source_label}"
 
         if file_path and os.path.exists(file_path):
             if source == "youtube_frame":
                 desc = "유튜브 영상의 특정 시점 프레임입니다. 영상 내용을 파악하는 데 활용하세요."
+            elif source == "upload":
+                desc = "사용자가 채팅에 직접 첨부한 이미지입니다. 이미지 내용을 파악해 현재 요청에 반영하세요."
+            elif source == "clipboard":
+                desc = "사용자가 클립보드에서 첨부한 이미지입니다. 이미지 내용을 파악해 현재 요청에 반영하세요."
             elif time_prefix == "현재":
                 desc = "지금 화면에 무엇이 보이는지 파악하세요."
             else:
@@ -208,6 +377,12 @@ MEMORY_INSTRUCTIONS = """\
 - 재시도 시 추가 텍스트 응답 없이 바로 `letta_memory_replace` 태그만 출력하세요.
 
 === Archival Memory (대용량 장기 저장, 검색으로 조회) ===
+
+Codex CLI에서는 `archival_memory_insert` 같은 Letta 도구를 직접 호출할 수 없습니다.
+대신 아래 XML 태그를 응답 맨 끝에 출력하세요. Codex CLI provider가 이 태그를 실제 Letta 도구 호출로 변환합니다:
+- `<letta_archival_insert ...>` → `archival_memory_insert`
+- `<letta_archival_search>` → `archival_memory_search`
+- `<letta_archival_delete>` → `archival_memory_delete`
 
 저장 (tags는 선택사항, 쉼표 구분):
 <letta_archival_insert tags="태그1,태그2">저장할 내용</letta_archival_insert>
@@ -288,14 +463,14 @@ class CodexCLIClient(LLMClientBase):
     ) -> dict:
         system_prompt, user_content = self._format_request(messages, system)
         combined_for_scan = system_prompt + "\n" + user_content
-        screenshot_files = re.findall(
-            r"Read 툴로 (/tmp/claude_(?:screenshot|yt_frame)_[a-f0-9_]+\.jpg) 파일을", combined_for_scan
-        )
+        screenshot_files = _SCREENSHOT_FILE_RE.findall(combined_for_scan)
         return {
             "system_prompt": system_prompt,
             "user_content": user_content,
             "model": llm_config.model or "",
             "screenshot_files": screenshot_files,
+            # 다중 세션: 알림/인터럽트/승인 의도 파일을 conversation 단위로 분리하기 위한 키
+            "session_key": extract_session_key(system_prompt),
         }
 
     # ---------------------------------------------------------------------------
@@ -326,6 +501,8 @@ class CodexCLIClient(LLMClientBase):
         session_key = sanitize_session_key(
             request_data.get("session_key") or extract_session_key(system_prompt)
         )
+        notify_file = progress_notify_file(session_key)
+        abort_file = abort_flag_file(session_key)
 
         output_path = f"/tmp/codex_cli_last_message_{uuid.uuid4().hex}.txt"
         prompt_text = (
@@ -336,18 +513,24 @@ class CodexCLIClient(LLMClientBase):
             f"{user_content}\n"
             "</user_content>\n\n"
             "위 system_prompt를 상위 지시로 따르고, user_content에만 답하세요. "
-            "최종 답변만 출력하세요."
+            "도구를 실행하기 전에 매번 그 명령으로 무엇을 왜 확인하거나 변경하는지 "
+            "네무린에게 한국어 한두 문장으로 먼저 알려주세요. "
+            "명령어 자체나 진행 상태만 나열하지 말고, 결과에 따라 판단할 다음 단계도 간단히 말해주세요. "
+            "최종 답변은 작업을 마친 뒤 한 번만 출력하세요."
         )
         cmd = [
             "codex",
             "--search",
-            "--ask-for-approval", "never",
+            "--ask-for-approval", "on-request",
             "exec",
-            "--sandbox", "read-only",
+            "--enable", "hooks",
+            "--dangerously-bypass-hook-trust",
+            "--sandbox", _CODEX_SANDBOX,
             "--skip-git-repo-check",
             "--ephemeral",
             "--color", "never",
-            "-C", "/tmp",
+            "--json",
+            "-C", _CODEX_EXEC_ROOT,
             "-o", output_path,
         ]
         if model and model != "codex-cli":
@@ -356,26 +539,50 @@ class CodexCLIClient(LLMClientBase):
 
         logger.info(
             f"[CodexCLI] 실행: codex exec <stdin({len(prompt_text)}chars)> "
-            f"--model {model or '<default>'} (screenshots={len(screenshot_files)})"
+            f"--model {model or '<default>'} "
+            f"(sandbox={_CODEX_SANDBOX}, cwd={_CODEX_EXEC_ROOT}, "
+            f"screenshots={len(screenshot_files)}, session={session_key})"
         )
         TIMEOUT_SECONDS = 300  # 5분
+        codex_home = _prepare_codex_home()
         child_env = {
             **os.environ,
+            "CODEX_HOME": codex_home,
             "MIZUKI_SESSION_KEY": session_key,
             "MIZUKI_INTENT_FILE": intent_file(session_key),
+            "VTUBER_CODEX_ALLOWLIST": os.path.expanduser(
+                "~/.config/open-llm-vtuber/codex_tool_allowlist.json"
+            ),
         }
+
+        # 중간 알림 파일 초기화 (이번 호출의 알림만 담도록 매번 비움)
+        try:
+            with open(notify_file, "w", encoding="utf-8") as _nf:
+                pass
+        except Exception:
+            pass
+
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd="/tmp",  # 프로젝트 AGENTS.md/CLAUDE.md 컨텍스트 격리
+                cwd=_CODEX_EXEC_ROOT,
                 env=child_env,
+                # codex JSONL 한 이벤트가 커질 수 있어 기본 64KB보다 넉넉히 잡는다.
+                limit=64 * 1024 * 1024,
             )
             try:
-                stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(prompt_text.encode("utf-8")),
+                response_data = await asyncio.wait_for(
+                    self._communicate_streaming_codex(
+                        proc=proc,
+                        prompt_text=prompt_text,
+                        output_path=output_path,
+                        notify_file=notify_file,
+                        abort_file=abort_file,
+                        session_key=session_key,
+                    ),
                     timeout=TIMEOUT_SECONDS,
                 )
             except asyncio.TimeoutError:
@@ -391,37 +598,180 @@ class CodexCLIClient(LLMClientBase):
                 message=f"codex CLI 실행 실패: {e}",
                 code=ErrorCode.INTERNAL_SERVER_ERROR,
             )
+        finally:
+            shutil.rmtree(codex_home, ignore_errors=True)
 
-        stdout_text = stdout.decode().strip()
-        stderr_text = stderr.decode().strip()
+        stdout_text = response_data["stdout_text"]
+        stderr_text = response_data["stderr_text"]
+        result_text = response_data["result_text"]
+        usage = response_data["usage"]
 
         debug_prompt = f"=== SYSTEM_PROMPT ===\n{system_prompt}\n\n=== USER_CONTENT ===\n{user_content}"
         self._dump_debug_log(debug_prompt, stdout_text, stderr_text, proc.returncode)
 
         if proc.returncode != 0:
+            # 시그널로 종료(SIGKILL=-9 등) → abort로 처리 → 빈 응답 반환
+            if proc.returncode < 0:
+                logger.info(
+                    f"[CodexCLI] proc이 시그널로 종료됨 (returncode={proc.returncode}) "
+                    f"— 사용자 인터럽트로 처리, 빈 응답 반환"
+                )
+                return {"result": "", "usage": {}}
             error_detail = stderr_text or stdout_text
+            if response_data.get("turn_error"):
+                error_detail = response_data["turn_error"]
             logger.error(f"[CodexCLI] 실패 (exit {proc.returncode}): {error_detail}")
             raise LLMServerError(
                 message=f"codex CLI 오류: {error_detail}",
                 code=ErrorCode.INTERNAL_SERVER_ERROR,
             )
 
+        if not usage:
+            usage = {
+                "input_tokens": max(1, len(prompt_text) // 4),
+                "output_tokens": max(1, len(result_text) // 4) if result_text else 0,
+            }
+        return {"result": result_text, "usage": usage}
+
+    @staticmethod
+    async def _communicate_streaming_codex(
+        proc: asyncio.subprocess.Process,
+        prompt_text: str,
+        output_path: str,
+        notify_file: str,
+        abort_file: str,
+        session_key: str,
+    ) -> dict:
+        """codex --json JSONL을 읽으며 [알림]과 abort를 실시간 처리한다."""
+        stdout_lines: list = []
+        stderr_chunks: list = []
+        usage: dict = {}
+        last_agent_text = ""
+        turn_error = ""
+        _seen_notifies: set = set()
+        pending_explanation = ""
+
+        try:
+            if os.path.exists(abort_file):
+                os.unlink(abort_file)
+        except Exception:
+            pass
+
+        async def _read_stderr() -> None:
+            data = await proc.stderr.read()
+            stderr_chunks.append(data.decode(errors="replace"))
+
+        async def _abort_watcher() -> None:
+            while True:
+                await asyncio.sleep(0.3)
+                if os.path.exists(abort_file):
+                    logger.info(f"[CodexCLI] abort 파일 감지 → proc.kill() (session={session_key})")
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                    return
+
+        stderr_task = asyncio.create_task(_read_stderr())
+        abort_task = asyncio.create_task(_abort_watcher())
+
+        try:
+            assert proc.stdin is not None
+            proc.stdin.write(prompt_text.encode("utf-8"))
+            await proc.stdin.drain()
+            proc.stdin.close()
+            try:
+                await proc.stdin.wait_closed()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+            assert proc.stdout is not None
+            while True:
+                line_bytes = await proc.stdout.readline()
+                if not line_bytes:
+                    break
+                line_str = line_bytes.decode(errors="replace").strip()
+                if not line_str:
+                    continue
+                stdout_lines.append(line_str)
+                try:
+                    msg = json.loads(line_str)
+                except json.JSONDecodeError:
+                    continue
+
+                msg_type = msg.get("type", "")
+                if msg_type == "item.started":
+                    item = msg.get("item") or {}
+                    has_explanation = False
+                    if pending_explanation and item.get("type") in {
+                        "command_execution", "web_search", "web_search_call", "search",
+                        "web_fetch", "browser_open", "mcp_tool_call", "tool_call", "function_call",
+                    }:
+                        has_explanation = _append_progress_notify(
+                            notify_file, pending_explanation, _seen_notifies
+                        )
+                        pending_explanation = ""
+                    progress_text = _codex_item_progress_text(item, "started")
+                    if progress_text and not (has_explanation and item.get("type") == "command_execution"):
+                        _append_progress_notify(notify_file, progress_text, _seen_notifies)
+                elif msg_type == "item.completed":
+                    item = msg.get("item") or {}
+                    if item.get("type") == "agent_message":
+                        text = item.get("text", "")
+                        if text:
+                            last_agent_text = text
+                            pending_explanation = _codex_explanation_text(text)
+                            for nm in _NOTIFY_PATTERN.finditer(text):
+                                notify = nm.group(1).strip()
+                                if notify:
+                                    _append_progress_notify(notify_file, notify, _seen_notifies)
+                    else:
+                        progress_text = _codex_item_progress_text(item, "completed")
+                        if progress_text:
+                            _append_progress_notify(notify_file, progress_text, _seen_notifies)
+                elif msg_type == "turn.completed":
+                    usage = msg.get("usage") or {}
+                elif msg_type == "turn.failed":
+                    err = msg.get("error") or {}
+                    turn_error = err.get("message") or json.dumps(err, ensure_ascii=False)
+                elif msg_type == "error":
+                    message = msg.get("message") or ""
+                    turn_error = message or turn_error
+                    if message.startswith("Reconnecting"):
+                        _append_progress_notify(notify_file, "Codex 연결을 재시도하고 있어요.", _seen_notifies)
+
+            await proc.wait()
+            await stderr_task
+        finally:
+            abort_task.cancel()
+            try:
+                await abort_task
+            except asyncio.CancelledError:
+                pass
+            try:
+                if os.path.exists(abort_file):
+                    os.unlink(abort_file)
+            except Exception:
+                pass
+
         try:
             with open(output_path, "r", encoding="utf-8") as f:
                 result_text = f.read().strip()
         except FileNotFoundError:
-            result_text = stdout_text.strip()
+            result_text = last_agent_text.strip()
         finally:
             try:
                 os.unlink(output_path)
             except FileNotFoundError:
                 pass
 
-        usage = {
-            "input_tokens": max(1, len(prompt_text) // 4),
-            "output_tokens": max(1, len(result_text) // 4) if result_text else 0,
+        return {
+            "stdout_text": "\n".join(stdout_lines),
+            "stderr_text": "".join(stderr_chunks).strip(),
+            "result_text": result_text,
+            "usage": usage,
+            "turn_error": turn_error,
         }
-        return {"result": result_text, "usage": usage}
 
     @staticmethod
     def _dump_debug_log(prompt: str, stdout: str, stderr: str, returncode: Optional[int]) -> None:
@@ -696,16 +1046,18 @@ class CodexCLIClient(LLMClientBase):
                 last_user_idx = i
                 break
 
-        history_msgs = non_system[:last_user_idx] if last_user_idx >= 0 else non_system
         current_msg = non_system[last_user_idx] if last_user_idx >= 0 else None
 
-        # history 직렬화 — XML 태그로 감싸서 transcript 패턴 회피
         history_parts: List[str] = []
-        for role, content, tool_calls in history_msgs:
+        continuation_parts: List[str] = []
+        for index, (role, content, tool_calls) in enumerate(non_system):
+            if index == last_user_idx:
+                continue
+            parts = continuation_parts if last_user_idx >= 0 and index > last_user_idx else history_parts
             if role == "user":
                 if not content.strip():
                     continue
-                history_parts.append(f"<user_message>\n{content}\n</user_message>")
+                parts.append(f"<user_message>\n{content}\n</user_message>")
             elif role == "assistant":
                 if tool_calls:
                     call_strs = []
@@ -715,13 +1067,13 @@ class CodexCLIClient(LLMClientBase):
                         args = self._get_field(fn, "arguments") or ""
                         call_strs.append(f"<tool_call name=\"{name}\">{args}</tool_call>")
                     body = (content + "\n" if content else "") + "\n".join(call_strs)
-                    history_parts.append(f"<assistant_message>\n{body}\n</assistant_message>")
+                    parts.append(f"<assistant_message>\n{body}\n</assistant_message>")
                 else:
                     if not content.strip():
                         continue
-                    history_parts.append(f"<assistant_message>\n{content}\n</assistant_message>")
+                    parts.append(f"<assistant_message>\n{content}\n</assistant_message>")
             elif role == "tool":
-                history_parts.append(f"<tool_result>\n{content}\n</tool_result>")
+                parts.append(f"<tool_result>\n{content}\n</tool_result>")
 
         user_content_parts: List[str] = []
         if history_parts:
@@ -731,6 +1083,8 @@ class CodexCLIClient(LLMClientBase):
 
         if current_msg is not None:
             user_content_parts.append(f"<current_input>\n{current_msg[1]}\n</current_input>")
+        if continuation_parts:
+            user_content_parts.append("<continuation>\n" + "\n".join(continuation_parts) + "\n</continuation>")
 
         user_content = "\n\n".join(user_content_parts)
         return system_prompt, user_content

@@ -1432,6 +1432,7 @@ class SyncServer(object):
             if model.provider_id not in provider_cache:
                 provider_cache[model.provider_id] = await self.provider_manager.get_provider_async(model.provider_id, actor)
             provider = provider_cache[model.provider_id]
+            typed_provider = provider.cast_to_subtype()
 
             # Skip non-base providers (they're handled separately)
             if provider.provider_category != ProviderCategory.base:
@@ -1440,7 +1441,11 @@ class SyncServer(object):
             embedding_config = EmbeddingConfig(
                 embedding_model=model.name,
                 embedding_endpoint_type=model.model_endpoint_type,
-                embedding_endpoint=provider.base_url or model.model_endpoint_type,
+                embedding_endpoint=(
+                    typed_provider.openai_compat_base_url
+                    if hasattr(typed_provider, "openai_compat_base_url")
+                    else provider.base_url or model.model_endpoint_type
+                ),
                 embedding_dim=model.embedding_dim or 1536,
                 embedding_chunk_size=constants.DEFAULT_EMBEDDING_CHUNK_SIZE,
                 handle=model.handle,
@@ -1481,7 +1486,11 @@ class SyncServer(object):
                     embedding_config = EmbeddingConfig(
                         embedding_model=model.name,
                         embedding_endpoint_type=model.model_endpoint_type,
-                        embedding_endpoint=typed_provider.base_url,
+                        embedding_endpoint=(
+                            typed_provider.openai_compat_base_url
+                            if hasattr(typed_provider, "openai_compat_base_url")
+                            else typed_provider.base_url
+                        ),
                         embedding_dim=model.embedding_dim or 1536,
                         embedding_chunk_size=constants.DEFAULT_EMBEDDING_CHUNK_SIZE,
                         handle=model.handle,

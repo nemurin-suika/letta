@@ -12,6 +12,14 @@ from letta.schemas.providers.base import Provider
 # "codex-cli"는 --model 없이 CLI 기본값을 사용하는 특수 값.
 CODEX_CLI_MODELS = {
     "codex-cli": 128000,  # CLI 기본 모델 (플래그 없음)
+    "gpt-5.5": 128000,
+    "gpt-5.6-sol": 128000,
+    "gpt-5.6-terra": 128000,
+    "gpt-5.6-luna": 128000,
+    "gpt-6-astra": 128000,
+    "gpt-6.1-sol": 128000,
+    "gpt-6-sol": 128000,
+    "gpt-6-luna": 128000,
 }
 
 

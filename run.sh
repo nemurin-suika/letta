@@ -1,19 +1,22 @@
 #!/bin/bash
 
-source ~/.secrets
+REAL_HOME="${MIZUKI_REAL_HOME:-~}"
+AI_HOME="${MIZUKI_AI_HOME:-${REAL_HOME}/ai}"
+export HOME="$AI_HOME"
+export CODEX_HOME="${CODEX_HOME:-${REAL_HOME}/.codex}"
 
-# Gemini API 키 (embedding 모델용) - 429 발생 시 자동으로 다음 키로 전환됨
-GEMINI_API_KEY="${GEMINI_KEYS[0]}"
-GEMINI_API_KEYS="$(IFS=,; echo "${GEMINI_KEYS[*]}")"
+# Optional Gemini variables are read from the environment only. The current
+# setup uses ollama/bge-m3 for embeddings, so no secrets file is required.
+GEMINI_API_KEY="${GEMINI_API_KEY:-}"
+GEMINI_API_KEYS="${GEMINI_API_KEYS:-$GEMINI_API_KEY}"
 
-LLM_FALLBACK_CONFIG='{"model": "claude-cli", "model_endpoint_type": "claude_cli", "context_window": 72000}'
+if [ -z "${LLM_FALLBACK_CONFIG:-}" ]; then
+    LLM_FALLBACK_CONFIG='{"model": "gpt-5.5", "model_endpoint_type": "codex_cli", "context_window": 128000}'
+fi
 
 PG_BIN="/opt/homebrew/opt/postgresql@17/bin"
-# ★ 데이터 경로는 OneDrive 밖(로컬)이어야 한다 ★
-# launchd 로 기동되는 프로세스는 OneDrive 파일 제공자 영역을 읽을 수 없다.
-#   pg_ctl -D <OneDrive 경로> status  → 영구 블록(응답 없음) 실측 확인
-# 그래서 pgdata/LETTA_DIR 은 ~/.mizuki 아래로 옮기고, OneDrive 에는
-# 1시간 주기 pg_dump 백업만 올린다(moe.nemurin.mizuki-backup).
+# Runtime data stays under ~/ai so the company laptop setup does not write to
+# the real home directory. CODEX_HOME still points at the real Codex config.
 PG_DATA="${MIZUKI_PG_DATA:-$HOME/.mizuki/pgdata}"
 PG_USER="postgres"
 PG_PASSWORD="postgres"
@@ -22,12 +25,11 @@ PG_PORT="5432"
 
 PGDATA_DIR="$HOME/.letta/.persist/pgdata"  # Docker 모드용 데이터 디렉터리
 PG_CONTAINER="letta-postgres"
+UV_RUN=(uv run --extra postgres --extra redis --extra server)
 
-# export 필수 — claude 서브프로세스(claude_cli_client.py가 os.environ.get으로 읽음)까지 전달돼야 hook이 붙는다.
-export VTUBER_CLAUDE_HOOK_SETTINGS=/Users/nemulin/develop/Open-LLM-VTuber-v1.2.1-en/scripts/claude_hook_settings.json
-# 승인 서버 주소 — 백엔드가 conf.yaml host(192.168.0.5)에만 바인드되므로 127.0.0.1로는 연결 안 됨.
-# 백엔드 host를 바꾸면 이 값도 같이 맞춰야 한다.
-export VTUBER_APPROVAL_URL=http://192.168.0.5:12393/tool-approval
+# Kept for compatibility if the model is switched back to claude_cli.
+export VTUBER_CLAUDE_HOOK_SETTINGS=~/ai/Open-LLM-VTuber-v1.2.1-en/scripts/claude_hook_settings.json
+export VTUBER_APPROVAL_URL=http://127.0.0.1:12393/tool-approval
 
 
 # ── 실행 모드 파싱 ────────────────────────────────────────────────────────────
@@ -46,30 +48,26 @@ if [ "$MODE" = "local" ]; then
 # ── 로컬 직접 실행 모드 ───────────────────────────────────────────────────────
 
     export PATH="$PG_BIN:$PATH"
-    mkdir -p ~/.letta/logs/claude_cli_debug
-    mkdir -p ~/.letta/logs/codex_cli_debug
+    mkdir -p "$HOME/.letta/logs/claude_cli_debug"
+    mkdir -p "$HOME/.letta/logs/codex_cli_debug"
 
-    # ── Claude CLI 로그인 확인 ──────────────────────────────────────────────
-    if ! command -v claude &>/dev/null; then
-        echo "[Claude] ERROR: 'claude' CLI를 찾을 수 없습니다. Claude Code CLI를 설치하세요."
+    # ── Codex CLI 확인 ─────────────────────────────────────────────────────
+    if ! command -v codex &>/dev/null; then
+        echo "[Codex] ERROR: 'codex' CLI를 찾을 수 없습니다. Codex CLI를 설치하세요."
         exit 1
     fi
-    # `claude -p "ping"`은 stdin이 TTY면 EOF를 기다리며 hang된다. 게다가 실제 API 호출이라
-    # 매 기동마다 CLAUDE.md 전체가 컨텍스트로 올라가 수 초 + 실비가 나간다.
-    # `claude auth status --json`은 네트워크/토큰 소모 없이 즉시 로그인 여부만 반환한다.
-    _CLAUDE_AUTH=$(claude auth status --json </dev/null 2>/dev/null)
-    if echo "$_CLAUDE_AUTH" | grep -q '"loggedIn"[[:space:]]*:[[:space:]]*true'; then
-        echo "[Claude] 로그인 확인됨"
-    else
-        echo "[Claude] 로그인이 필요합니다..."
-        claude auth login
-        echo "[Claude] 로그인 완료"
-    fi
+    codex --version </dev/null
+    echo "[Codex] CODEX_HOME=${CODEX_HOME}"
 
     # ── PostgreSQL 시작 (Homebrew 네이티브) ────────────────────────────────
     if pg_ctl -D "$PG_DATA" status >/dev/null 2>&1; then
         echo "[DB] PostgreSQL 이미 실행 중"
     else
+        if [ ! -s "$PG_DATA/PG_VERSION" ]; then
+            echo "[DB] PostgreSQL 데이터 디렉터리 초기화 중: $PG_DATA"
+            mkdir -p "$PG_DATA"
+            initdb -D "$PG_DATA" --encoding=UTF8 --locale=en_US.UTF-8
+        fi
         echo "[DB] PostgreSQL 시작 중..."
         pg_ctl -D "$PG_DATA" -l "$PG_DATA/server.log" start
         sleep 1
@@ -89,7 +87,7 @@ if [ "$MODE" = "local" ]; then
 
     # ── DB 마이그레이션 ─────────────────────────────────────────────────────
     echo "[DB] 데이터베이스 마이그레이션 중..."
-    uv run alembic upgrade head
+    "${UV_RUN[@]}" alembic upgrade head
 
     # ── Redis 시작 ──────────────────────────────────────────────────────────
     REDIS_HOST="127.0.0.1"
@@ -102,7 +100,7 @@ if [ "$MODE" = "local" ]; then
         echo "[Redis] 이미 실행 중 (${REDIS_HOST}:${REDIS_PORT})"
     else
         echo "[Redis] 시작 중..."
-        mkdir -p ~/.letta/logs
+        mkdir -p "$HOME/.letta/logs"
         redis-server --daemonize yes \
             --bind "$REDIS_HOST" \
             --port "$REDIS_PORT" \
@@ -115,7 +113,7 @@ if [ "$MODE" = "local" ]; then
         done
         redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" ping 2>/dev/null | grep -q "PONG" \
             && echo "[Redis] 시작 완료" \
-            || { echo "[Redis] ERROR: 시작 실패. ~/.letta/logs/redis.log 확인"; exit 1; }
+            || { echo "[Redis] ERROR: 시작 실패. $HOME/.letta/logs/redis.log 확인"; exit 1; }
     fi
 
     # ── CPU 코어 수 자동 감지 → 워커 수 설정 ─────────────────────────────────
@@ -128,7 +126,7 @@ if [ "$MODE" = "local" ]; then
     export GEMINI_API_KEY="$GEMINI_API_KEY"
     export GEMINI_API_KEYS="$GEMINI_API_KEYS"
     export LLM_FALLBACK_CONFIG="$LLM_FALLBACK_CONFIG"
-    # 로그는 OneDrive 제외 — 로컬에만 유지
+    # Logs are local to the company laptop setup.
     LOG_DIR="${HOME}/.letta/logs"
     export LETTA_WORKER_LOG_DIR="${HOME}/.letta/logs"
     export LETTA_CLAUDE_CLI_DEBUG_DIR="${HOME}/.letta/logs/claude_cli_debug"
@@ -142,45 +140,13 @@ if [ "$MODE" = "local" ]; then
     export LETTA_START_TIME="$_START_TIME"
     echo "[Letta] 로컬 서버 시작 (http://0.0.0.0:8283, workers=${_WORKERS}, redis=${REDIS_HOST}:${REDIS_PORT})..."
     echo "[Letta] 워커 로그 경로: ${LOG_DIR}/letta-worker-${_START_TIME}-<PID>.log"
-    exec uv run letta server --host 0.0.0.0 --port 8283 2>&1 | tee -a "${LOG_DIR}/main-${_START_TIME}.log"
+    exec "${UV_RUN[@]}" letta server --host 0.0.0.0 --port 8283 2>&1 | tee -a "${LOG_DIR}/main-${_START_TIME}.log"
 
 # =============================================================================
 else
 # ── Docker 실행 모드 (기존 동작) ──────────────────────────────────────────────
 
-    mkdir -p "$PGDATA_DIR"
-    mkdir -p ~/.letta/logs/claude_cli_debug
-
-    # Claude CLI 로그인 확인
-    _CLAUDE_AUTH_OUT=$(docker run --rm \
-      -v letta-claude-auth:/root/.claude \
-      letta/letta:nemurin \
-      claude auth status --json 2>/dev/null)
-
-    if echo "$_CLAUDE_AUTH_OUT" | grep -q '"loggedIn"[[:space:]]*:[[:space:]]*true'; then
-        echo "[Claude] 로그인 확인됨"
-    else
-        echo "[Claude] 로그인이 필요합니다. 브라우저 인증을 진행합니다..."
-        docker run --rm -it \
-          -v letta-claude-auth:/root/.claude \
-          letta/letta:nemurin \
-          claude auth login
-        echo "[Claude] 로그인 완료"
-    fi
-
-    # --add-host=host.docker.internal:host-gateway
-    #   macOS Docker Desktop: host.docker.internal은 자동으로 사용 가능하지만 명시적으로 추가
-    #   Linux: 이 옵션 없이는 host.docker.internal이 컨테이너에서 사용 불가
-    echo "[Letta] Docker 컨테이너 시작..."
-    docker run \
-      -v "$PGDATA_DIR:/var/lib/postgresql/data" \
-      -v letta-claude-auth:/root/.claude \
-      -v ~/.letta/logs/claude_cli_debug:/app/logs/claude_cli_debug \
-      -p 8283:8283 \
-      --add-host=host.docker.internal:host-gateway \
-      -e GEMINI_API_KEY="$GEMINI_API_KEY" \
-      -e GEMINI_API_KEYS="$GEMINI_API_KEYS" \
-      -e LLM_FALLBACK_CONFIG="$LLM_FALLBACK_CONFIG" \
-      letta/letta:nemurin
+    echo "[Letta] ERROR: Docker mode is not configured for codex_cli. Use ./run.sh --local."
+    exit 1
 
 fi
