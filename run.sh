@@ -1,22 +1,57 @@
 #!/bin/bash
 
-REAL_HOME="${MIZUKI_REAL_HOME:-~}"
-AI_HOME="${MIZUKI_AI_HOME:-${REAL_HOME}/ai}"
+# ── 머신별 설정 ───────────────────────────────────────────────────────────────
+# 기본값은 집(맥미니 / claude_cli). 다른 머신은 이 파일을 고치지 말고
+# ~/.mizuki_env 를 만들어 아래 변수만 덮어쓴다. 리포 밖 파일이라 git 충돌 없음.
+#
+#   MIZUKI_REAL_HOME            실제 홈 (기본: 현재 HOME)
+#   MIZUKI_AI_HOME              런타임 데이터 홈 (기본: REAL_HOME)
+#   MIZUKI_LLM_CLI              claude | codex (기본: claude)
+#   MIZUKI_SECRETS_FILE         시크릿 파일 (기본: REAL_HOME/.secrets, 없으면 생략)
+#   LLM_FALLBACK_CONFIG         폴백 모델 JSON
+#   VTUBER_CLAUDE_HOOK_SETTINGS 툴 승인 hook 설정 파일
+#   VTUBER_APPROVAL_URL         툴 승인 서버 주소
+#   CODEX_HOME                  codex 설정 디렉터리 (codex 사용 시)
+#
+# 회사 노트북 예시:
+#   MIZUKI_REAL_HOME=~
+#   MIZUKI_AI_HOME=~/ai
+#   MIZUKI_LLM_CLI=codex
+#   LLM_FALLBACK_CONFIG='{"model": "gpt-5.5", "model_endpoint_type": "codex_cli", "context_window": 128000}'
+#   VTUBER_CLAUDE_HOOK_SETTINGS=~/ai/Open-LLM-VTuber-v1.2.1-en/scripts/claude_hook_settings.json
+#   VTUBER_APPROVAL_URL=http://127.0.0.1:12393/tool-approval
+[ -r "$HOME/.mizuki_env" ] && . "$HOME/.mizuki_env"
+
+REAL_HOME="${MIZUKI_REAL_HOME:-$HOME}"
+AI_HOME="${MIZUKI_AI_HOME:-$REAL_HOME}"
 export HOME="$AI_HOME"
 export CODEX_HOME="${CODEX_HOME:-${REAL_HOME}/.codex}"
+MIZUKI_LLM_CLI="${MIZUKI_LLM_CLI:-claude}"
 
-# Optional Gemini variables are read from the environment only. The current
-# setup uses ollama/bge-m3 for embeddings, so no secrets file is required.
+# Gemini API 키 (embedding 폴백용) - 429 발생 시 자동으로 다음 키로 전환됨.
+# 현재 임베딩은 ollama/bge-m3 라서 없어도 동작한다.
+MIZUKI_SECRETS_FILE="${MIZUKI_SECRETS_FILE:-${REAL_HOME}/.secrets}"
+if [ -r "$MIZUKI_SECRETS_FILE" ]; then
+    . "$MIZUKI_SECRETS_FILE"
+    if [ -n "${GEMINI_KEYS:-}" ]; then
+        GEMINI_API_KEY="${GEMINI_API_KEY:-${GEMINI_KEYS[0]}}"
+        GEMINI_API_KEYS="${GEMINI_API_KEYS:-$(IFS=,; echo "${GEMINI_KEYS[*]}")}"
+    fi
+fi
 GEMINI_API_KEY="${GEMINI_API_KEY:-}"
 GEMINI_API_KEYS="${GEMINI_API_KEYS:-$GEMINI_API_KEY}"
 
 if [ -z "${LLM_FALLBACK_CONFIG:-}" ]; then
-    LLM_FALLBACK_CONFIG='{"model": "gpt-5.5", "model_endpoint_type": "codex_cli", "context_window": 128000}'
+    LLM_FALLBACK_CONFIG='{"model": "claude-cli", "model_endpoint_type": "claude_cli", "context_window": 72000}'
 fi
 
 PG_BIN="/opt/homebrew/opt/postgresql@17/bin"
-# Runtime data stays under ~/ai so the company laptop setup does not write to
-# the real home directory. CODEX_HOME still points at the real Codex config.
+# ★ 데이터 경로는 OneDrive 밖(로컬)이어야 한다 ★
+# launchd 로 기동되는 프로세스는 OneDrive 파일 제공자 영역을 읽을 수 없다.
+#   pg_ctl -D <OneDrive 경로> status  → 영구 블록(응답 없음) 실측 확인
+# 그래서 pgdata/LETTA_DIR 은 ~/.mizuki 아래로 옮기고, OneDrive 에는
+# 1시간 주기 pg_dump 백업만 올린다(moe.nemurin.mizuki-backup).
+# 회사 노트북은 MIZUKI_AI_HOME 으로 HOME 을 ~/ai 로 돌려 실제 홈을 건드리지 않는다.
 PG_DATA="${MIZUKI_PG_DATA:-$HOME/.mizuki/pgdata}"
 PG_USER="postgres"
 PG_PASSWORD="postgres"
@@ -27,9 +62,12 @@ PGDATA_DIR="$HOME/.letta/.persist/pgdata"  # Docker 모드용 데이터 디렉�
 PG_CONTAINER="letta-postgres"
 UV_RUN=(uv run --extra postgres --extra redis --extra server)
 
-# Kept for compatibility if the model is switched back to claude_cli.
-export VTUBER_CLAUDE_HOOK_SETTINGS=~/ai/Open-LLM-VTuber-v1.2.1-en/scripts/claude_hook_settings.json
-export VTUBER_APPROVAL_URL=http://127.0.0.1:12393/tool-approval
+# export 필수 — CLI 서브프로세스(claude_cli_client.py / codex_cli_client.py 가
+# os.environ.get 으로 읽음)까지 전달돼야 hook 이 붙는다.
+export VTUBER_CLAUDE_HOOK_SETTINGS="${VTUBER_CLAUDE_HOOK_SETTINGS:-${REAL_HOME}/develop/Open-LLM-VTuber-v1.2.1-en/scripts/claude_hook_settings.json}"
+# 승인 서버 주소 — 집 백엔드는 conf.yaml host(192.168.0.5)에만 바인드되므로
+# 127.0.0.1 로는 연결되지 않는다. 백엔드 host 를 바꾸면 이 값도 같이 맞춘다.
+export VTUBER_APPROVAL_URL="${VTUBER_APPROVAL_URL:-http://192.168.0.5:12393/tool-approval}"
 
 
 # ── 실행 모드 파싱 ────────────────────────────────────────────────────────────
@@ -51,13 +89,31 @@ if [ "$MODE" = "local" ]; then
     mkdir -p "$HOME/.letta/logs/claude_cli_debug"
     mkdir -p "$HOME/.letta/logs/codex_cli_debug"
 
-    # ── Codex CLI 확인 ─────────────────────────────────────────────────────
-    if ! command -v codex &>/dev/null; then
-        echo "[Codex] ERROR: 'codex' CLI를 찾을 수 없습니다. Codex CLI를 설치하세요."
-        exit 1
+    # ── LLM CLI 확인 (MIZUKI_LLM_CLI = claude | codex) ─────────────────────
+    if [ "$MIZUKI_LLM_CLI" = "codex" ]; then
+        if ! command -v codex &>/dev/null; then
+            echo "[Codex] ERROR: 'codex' CLI를 찾을 수 없습니다. Codex CLI를 설치하세요."
+            exit 1
+        fi
+        codex --version </dev/null
+        echo "[Codex] CODEX_HOME=${CODEX_HOME}"
+    else
+        if ! command -v claude &>/dev/null; then
+            echo "[Claude] ERROR: 'claude' CLI를 찾을 수 없습니다. Claude Code CLI를 설치하세요."
+            exit 1
+        fi
+        # `claude -p "ping"`은 stdin이 TTY면 EOF를 기다리며 hang된다. 게다가 실제 API 호출이라
+        # 매 기동마다 CLAUDE.md 전체가 컨텍스트로 올라가 수 초 + 실비가 나간다.
+        # `claude auth status --json`은 네트워크/토큰 소모 없이 즉시 로그인 여부만 반환한다.
+        _CLAUDE_AUTH=$(claude auth status --json </dev/null 2>/dev/null)
+        if echo "$_CLAUDE_AUTH" | grep -q '"loggedIn"[[:space:]]*:[[:space:]]*true'; then
+            echo "[Claude] 로그인 확인됨"
+        else
+            echo "[Claude] 로그인이 필요합니다..."
+            claude auth login
+            echo "[Claude] 로그인 완료"
+        fi
     fi
-    codex --version </dev/null
-    echo "[Codex] CODEX_HOME=${CODEX_HOME}"
 
     # ── PostgreSQL 시작 (Homebrew 네이티브) ────────────────────────────────
     if pg_ctl -D "$PG_DATA" status >/dev/null 2>&1; then
@@ -146,7 +202,9 @@ if [ "$MODE" = "local" ]; then
 else
 # ── Docker 실행 모드 (기존 동작) ──────────────────────────────────────────────
 
-    echo "[Letta] ERROR: Docker mode is not configured for codex_cli. Use ./run.sh --local."
+    # Docker 모드는 현재 구성에서 쓰지 않는다(집·회사 둘 다 --local).
+    # 과거 docker run 블록은 git 히스토리와 _mz_backup/letta-run.sh.home-20261026 에 있다.
+    echo "[Letta] ERROR: Docker 모드는 현재 구성에서 지원하지 않습니다. ./run.sh --local 을 쓰세요."
     exit 1
 
 fi
