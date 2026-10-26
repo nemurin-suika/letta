@@ -7,8 +7,10 @@ import asyncio
 import glob
 import json
 import os
+import pwd
 import re
 import shutil
+import subprocess
 import time
 import uuid
 from typing import TYPE_CHECKING, List, Optional, Tuple
@@ -104,6 +106,29 @@ _CODEX_HOOKS_JSON = {
 }
 _CODEX_EXEC_ROOT = os.environ.get("VTUBER_CODEX_EXEC_ROOT", "~/ai")
 _CODEX_SANDBOX = os.environ.get("VTUBER_CODEX_SANDBOX", "danger-full-access")
+
+
+def _codex_user_environment() -> dict[str, str]:
+    real_home = os.environ.get("MIZUKI_REAL_HOME") or pwd.getpwuid(os.getuid()).pw_dir
+    environment = {"HOME": real_home}
+    try:
+        shell = subprocess.run(
+            ["/bin/zsh", "-lic", "/usr/bin/env -0"],
+            env={**os.environ, "HOME": real_home},
+            capture_output=True,
+            check=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        logger.warning("[CodexCLI] Could not read user shell environment: %s", type(error).__name__)
+        return environment
+
+    allowed = {"PATH", "JAVA_HOME", "ERL_AFLAGS", "OTP_VSN", "_KERL_ACTIVE_DIR", "CARGO_HOME", "GOPATH"}
+    for entry in shell.stdout.split(b"\0"):
+        key, separator, value = entry.partition(b"=")
+        if separator and key.decode("utf-8", errors="replace") in allowed:
+            environment[key.decode("utf-8")] = value.decode("utf-8", errors="replace")
+    return environment
 
 
 def _sanitized_codex_config(raw: str) -> str:
@@ -547,6 +572,7 @@ class CodexCLIClient(LLMClientBase):
         codex_home = _prepare_codex_home()
         child_env = {
             **os.environ,
+            **_codex_user_environment(),
             "CODEX_HOME": codex_home,
             "MIZUKI_SESSION_KEY": session_key,
             "MIZUKI_INTENT_FILE": intent_file(session_key),
