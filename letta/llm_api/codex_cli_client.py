@@ -106,6 +106,71 @@ _CODEX_HOOKS_JSON = {
 }
 _CODEX_EXEC_ROOT = os.environ.get("VTUBER_CODEX_EXEC_ROOT", "~/ai")
 _CODEX_SANDBOX = os.environ.get("VTUBER_CODEX_SANDBOX", "danger-full-access")
+_CLAUDE_MCP_CONFIG = os.path.join(
+    os.environ.get("MIZUKI_REAL_HOME") or pwd.getpwuid(os.getuid()).pw_dir, ".claude", ".mcp.json"
+)
+
+
+def _requested_mcp_servers(messages: List[Message]) -> tuple[str, ...]:
+    """Select servers from the latest user message, never tool output or history."""
+    latest_user = ""
+    for message in reversed(messages):
+        if CodexCLIClient._get_field(message, "role") == "user":
+            latest_user = CodexCLIClient._get_content(message) or ""
+            if latest_user.strip():
+                break
+    selected = []
+    if re.search(r"(?<![\w.-])wiki\.[a-z0-9-]+(?:\.[a-z0-9-]+)+(?![\w.-])", latest_user, re.IGNORECASE):
+        selected.append("confluence")
+    if re.search(r"슬랙|(?<![\w.-])slack(?![\w.-])|(?<![\w.-])[a-z0-9-]+\.slack\.com(?![\w.-])", latest_user, re.IGNORECASE):
+        selected.append("slack")
+    return tuple(selected)
+
+
+def _mcp_config_sections(servers: tuple[str, ...]) -> str:
+    """Translate selected Claude stdio servers into Codex TOML sections."""
+    if not servers:
+        return ""
+    try:
+        with open(_CLAUDE_MCP_CONFIG, encoding="utf-8") as config_file:
+            definitions = json.load(config_file)["mcpServers"]
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        logger.warning("[CodexCLI] MCP config unavailable: %s", type(error).__name__)
+        return ""
+
+    sections = []
+    for name in servers:
+        server = definitions.get(name)
+        if not isinstance(server, dict) or server.get("disabled") or server.get("type", "stdio") != "stdio":
+            logger.warning("[CodexCLI] MCP server unavailable: %s", name)
+            continue
+        command, args, environment = server.get("command"), server.get("args", []), server.get("env", {})
+        if (
+            not isinstance(command, str)
+            or not command
+            or not isinstance(args, list)
+            or not all(isinstance(arg, str) for arg in args)
+            or not isinstance(environment, dict)
+            or not all(isinstance(key, str) and isinstance(value, str) for key, value in environment.items())
+        ):
+            logger.warning("[CodexCLI] Invalid MCP server definition: %s", name)
+            continue
+        sections.extend(
+            [
+                f"[mcp_servers.{name}]",
+                f"command = {json.dumps(command, ensure_ascii=False)}",
+                f"args = {json.dumps(args, ensure_ascii=False)}",
+            ]
+        )
+        if isinstance(server.get("timeout"), (int, float)) and server["timeout"] > 0:
+            sections.append(f"startup_timeout_sec = {server['timeout']}")
+        if environment:
+            entries = ", ".join(
+                f"{json.dumps(key, ensure_ascii=False)} = {json.dumps(value, ensure_ascii=False)}" for key, value in environment.items()
+            )
+            sections.append(f"env = {{ {entries} }}")
+        sections.append("")
+    return "\n".join(sections)
 
 
 def _codex_user_environment() -> dict[str, str]:
@@ -135,6 +200,7 @@ def _sanitized_codex_config(raw: str) -> str:
     """Copy Codex config while dropping hook trust state and deprecated hook key."""
     lines = []
     skip_hook_state = False
+    skip_mcp_servers = False
     saw_features = False
     saw_hooks_feature = False
 
@@ -142,13 +208,14 @@ def _sanitized_codex_config(raw: str) -> str:
         stripped = line.strip()
         if stripped.startswith("[") and stripped.endswith("]"):
             skip_hook_state = stripped == "[hooks.state]" or stripped.startswith("[hooks.state.")
-            if skip_hook_state:
+            skip_mcp_servers = stripped == "[mcp_servers]" or stripped.startswith("[mcp_servers.")
+            if skip_hook_state or skip_mcp_servers:
                 continue
             if stripped == "[features]":
                 saw_features = True
             lines.append(line)
             continue
-        if skip_hook_state:
+        if skip_hook_state or skip_mcp_servers:
             continue
         if stripped.startswith("codex_hooks"):
             lines.append("hooks = true")
@@ -165,11 +232,11 @@ def _sanitized_codex_config(raw: str) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _prepare_codex_home() -> str:
+def _prepare_codex_home(servers: tuple[str, ...] = ()) -> str:
     """Build a per-call CODEX_HOME with real provider config and only the VTuber approval hook."""
     real_home = os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
     temp_home = os.path.join("/tmp", f"letta_codex_home_{uuid.uuid4().hex}")
-    os.makedirs(temp_home, exist_ok=True)
+    os.makedirs(temp_home, mode=0o700)
 
     config_path = os.path.join(real_home, "config.toml")
     try:
@@ -177,7 +244,10 @@ def _prepare_codex_home() -> str:
             config_text = _sanitized_codex_config(f.read())
     except OSError:
         config_text = "[features]\nhooks = true\n"
-    with open(os.path.join(temp_home, "config.toml"), "w", encoding="utf-8") as f:
+    config_text += "\n" + _mcp_config_sections(servers)
+    with os.fdopen(
+        os.open(os.path.join(temp_home, "config.toml"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w", encoding="utf-8"
+    ) as f:
         f.write(config_text)
     with open(os.path.join(temp_home, "hooks.json"), "w", encoding="utf-8") as f:
         json.dump(_CODEX_HOOKS_JSON, f, ensure_ascii=False, indent=2)
@@ -496,6 +566,7 @@ class CodexCLIClient(LLMClientBase):
             "screenshot_files": screenshot_files,
             # 다중 세션: 알림/인터럽트/승인 의도 파일을 conversation 단위로 분리하기 위한 키
             "session_key": extract_session_key(system_prompt),
+            "mcp_servers": _requested_mcp_servers(messages),
         }
 
     # ---------------------------------------------------------------------------
@@ -569,7 +640,7 @@ class CodexCLIClient(LLMClientBase):
             f"screenshots={len(screenshot_files)}, session={session_key})"
         )
         TIMEOUT_SECONDS = 3600
-        codex_home = _prepare_codex_home()
+        codex_home = _prepare_codex_home(request_data.get("mcp_servers", ()))
         child_env = {
             **os.environ,
             **_codex_user_environment(),
@@ -1132,10 +1203,10 @@ class CodexCLIClient(LLMClientBase):
     @staticmethod
     def _get_content(msg) -> str:
         from letta.schemas.letta_message_content import (
-            TextContent,
-            ImageContent,
-            UrlImage,
             Base64Image,
+            ImageContent,
+            TextContent,
+            UrlImage,
         )
 
         content = CodexCLIClient._get_field(msg, "content") or ""
