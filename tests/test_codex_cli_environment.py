@@ -50,14 +50,22 @@ def test_mcp_selection_uses_only_latest_user_message():
         "slack",
     )
     assert _requested_mcp_servers([{"role": "user", "content": "fakewiki.example.com"}]) == ()
+    assert _requested_mcp_servers([{"role": "user", "content": "Jira에서 LEGY-123 티켓 확인해줘"}]) == ("jira",)
+    assert _requested_mcp_servers([{"role": "user", "content": "Jira에서 이슈 확인해줘"}]) == ("jira",)
+    assert _requested_mcp_servers([{"role": "user", "content": "https://jira.example.com/browse/LEGY-123 확인"}]) == ("jira",)
+    assert _requested_mcp_servers([{"role": "user", "content": "LEGY-123 이슈 확인해줘"}]) == ("jira",)
+    assert _requested_mcp_servers([{"role": "user", "content": "LEGY-123 PR 검토해줘"}]) == ()
+    assert _requested_mcp_servers([{"role": "user", "content": "notjira 문서 검토해줘"}]) == ()
+    assert _requested_mcp_servers([{"role": "user", "content": "jira.example.com 문서 검토해줘"}]) == ()
+    assert _requested_mcp_servers([{"role": "user", "content": "Jira 티켓 확인해줘"}, {"role": "tool", "content": "Jira"}, {"role": "user", "content": "고마워"}]) == ()
 
 
 def test_build_request_selects_mcp_from_user_not_system_or_tools():
     client = CodexCLIClient()
     messages = [
-        {"role": "system", "content": "wiki.example.com"},
+        {"role": "system", "content": "wiki.example.com Jira"},
         {"role": "user", "content": "슬랙 확인"},
-        {"role": "tool", "content": "wiki.example.com"},
+        {"role": "tool", "content": "wiki.example.com Jira"},
     ]
     config = type("Config", (), {"model": "codex-cli"})()
     request = client.build_request_data(None, messages, config, [])
@@ -78,6 +86,7 @@ def test_temporary_codex_home_contains_only_requested_mcp(tmp_path):
                         "timeout": 300,
                     },
                     "slack": {"type": "stdio", "command": "slack-server", "args": []},
+                    "jira": {"type": "stdio", "command": "npx", "args": ["--registry", "https://registry.npmjs.org", "@example/mcp-connector@latest", "https://jira.example.com/mcp"], "timeout": 300},
                     "google-drive": {"type": "stdio", "command": "drive-server", "args": []},
                 }
             }
@@ -94,7 +103,7 @@ def test_temporary_codex_home_contains_only_requested_mcp(tmp_path):
         patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}),
         patch("letta.llm_api.codex_cli_client._CLAUDE_MCP_CONFIG", str(claude_config)),
     ):
-        for requested, expected in [((), set()), (("confluence",), {"confluence"}), (("slack",), {"slack"})]:
+        for requested, expected in [((), set()), (("confluence",), {"confluence"}), (("slack",), {"slack"}), (("jira",), {"jira"}), (("jira", "confluence"), {"jira", "confluence"})]:
             temp_home = _prepare_codex_home(requested)
             try:
                 config_path = os.path.join(temp_home, "config.toml")

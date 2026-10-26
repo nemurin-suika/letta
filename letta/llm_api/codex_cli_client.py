@@ -124,6 +124,14 @@ def _requested_mcp_servers(messages: List[Message]) -> tuple[str, ...]:
         selected.append("confluence")
     if re.search(r"슬랙|(?<![\w.-])slack(?![\w.-])|(?<![\w.-])[a-z0-9-]+\.slack\.com(?![\w.-])", latest_user, re.IGNORECASE):
         selected.append("slack")
+    if re.search(
+        r"(?<![\w.-])jira(?![A-Za-z0-9_.-])|(?<![\w.-])https?://jira\.[a-z0-9-]+(?:\.[a-z0-9-]+)+(?![\w.-])|지라|"
+        r"\b[A-Z][A-Z0-9]+-\d+\b.*(?:티켓|이슈)|"
+        r"(?:티켓|이슈).*\b[A-Z][A-Z0-9]+-\d+\b",
+        latest_user,
+        re.IGNORECASE,
+    ):
+        selected.append("jira")
     return tuple(selected)
 
 
