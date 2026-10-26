@@ -568,7 +568,7 @@ class CodexCLIClient(LLMClientBase):
             f"(sandbox={_CODEX_SANDBOX}, cwd={_CODEX_EXEC_ROOT}, "
             f"screenshots={len(screenshot_files)}, session={session_key})"
         )
-        TIMEOUT_SECONDS = 300  # 5분
+        TIMEOUT_SECONDS = 3600
         codex_home = _prepare_codex_home()
         child_env = {
             **os.environ,
@@ -612,8 +612,9 @@ class CodexCLIClient(LLMClientBase):
                     timeout=TIMEOUT_SECONDS,
                 )
             except asyncio.TimeoutError:
-                proc.kill()
-                await proc.communicate()  # 버퍼 정리
+                if proc.returncode is None:
+                    proc.kill()
+                await proc.wait()
                 logger.error(f"[CodexCLI] {TIMEOUT_SECONDS}초 타임아웃 — 프로세스 강제 종료")
                 raise LLMServerError(
                     message=f"codex CLI 타임아웃: {TIMEOUT_SECONDS}초 초과",
@@ -774,6 +775,12 @@ class CodexCLIClient(LLMClientBase):
                 await abort_task
             except asyncio.CancelledError:
                 pass
+            if not stderr_task.done():
+                stderr_task.cancel()
+                try:
+                    await stderr_task
+                except asyncio.CancelledError:
+                    pass
             try:
                 if os.path.exists(abort_file):
                     os.unlink(abort_file)
