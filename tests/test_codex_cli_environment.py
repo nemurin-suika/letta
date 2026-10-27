@@ -1,18 +1,71 @@
 import json
 import os
+import runpy
+import shlex
 import shutil
 import subprocess
 import tomllib
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
+from letta.llm_api import codex_cli_client
 from letta.llm_api.codex_cli_client import (
     CodexCLIClient,
     _codex_user_environment,
     _prepare_codex_home,
     _requested_mcp_servers,
 )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "real_home", "ai_home", "execution_root"),
+    [
+        ({}, "/Users/example user", "/Users/example user/ai", "/Users/example user/ai"),
+        (
+            {"MIZUKI_REAL_HOME": "/Users/other user"},
+            "/Users/other user",
+            "/Users/other user/ai",
+            "/Users/other user/ai",
+        ),
+        (
+            {"MIZUKI_AI_HOME": "~/custom data", "VTUBER_CODEX_EXEC_ROOT": "~/work tree"},
+            "/Users/example user",
+            "/Users/example user/custom data",
+            "/Users/example user/work tree",
+        ),
+        (
+            {"MIZUKI_AI_HOME": "/opt/ai data", "VTUBER_CODEX_EXEC_ROOT": "/opt/work tree"},
+            "/Users/example user",
+            "/opt/ai data",
+            "/opt/work tree",
+        ),
+        (
+            {"MIZUKI_REAL_HOME": "/Users/example's home; safe"},
+            "/Users/example's home; safe",
+            "/Users/example's home; safe/ai",
+            "/Users/example's home; safe/ai",
+        ),
+    ],
+)
+def test_codex_paths_do_not_depend_on_runtime_home(overrides, real_home, ai_home, execution_root):
+    with (
+        patch.dict(os.environ, {"HOME": "/runtime/data", **overrides}, clear=True),
+        patch("pwd.getpwuid", return_value=SimpleNamespace(pw_dir="/Users/example user")),
+    ):
+        module = runpy.run_path(codex_cli_client.__file__)
+        assert module["_user_path"]("~") == real_home
+
+    assert module["_CODEX_EXEC_ROOT"] == execution_root
+    assert module["_CLAUDE_MCP_CONFIG"] == f"{real_home}/.claude/.mcp.json"
+    hook_command = module["_CODEX_APPROVAL_HOOK"]
+    assert shlex.split(hook_command) == [
+        "python3",
+        f"{ai_home}/Open-LLM-VTuber-v1.2.1-en/scripts/claude_tool_approval_hook.py",
+    ]
+    for event in ("PreToolUse", "PermissionRequest"):
+        assert module["_CODEX_HOOKS_JSON"]["hooks"][event][0]["hooks"][0]["command"] == hook_command
 
 
 def test_codex_uses_real_home_and_user_shell_path():

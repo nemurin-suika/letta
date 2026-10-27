@@ -9,6 +9,7 @@ import json
 import os
 import pwd
 import re
+import shlex
 import shutil
 import subprocess
 import time
@@ -85,8 +86,19 @@ _SCREENSHOT_FILE_RE = re.compile(
 # codex 응답 텍스트에서 [알림: 내용] 패턴 감지
 _NOTIFY_PATTERN = re.compile(r'\[알림:\s*(.*?)\]', re.DOTALL)
 
-_CODEX_APPROVAL_HOOK = (
-    "python3 ~/ai/Open-LLM-VTuber-v1.2.1-en/scripts/claude_tool_approval_hook.py"
+
+def _user_path(value: str) -> str:
+    real_home = os.environ.get("MIZUKI_REAL_HOME") or pwd.getpwuid(os.getuid()).pw_dir
+    if value == "~":
+        return real_home
+    if value.startswith("~/"):
+        return os.path.join(real_home, value[2:])
+    return os.path.expanduser(value)
+
+
+_AI_HOME = _user_path(os.environ.get("MIZUKI_AI_HOME") or "~/ai")
+_CODEX_APPROVAL_HOOK = shlex.join(
+    ["python3", os.path.join(_AI_HOME, "Open-LLM-VTuber-v1.2.1-en", "scripts", "claude_tool_approval_hook.py")]
 )
 _CODEX_HOOKS_JSON = {
     "hooks": {
@@ -104,11 +116,9 @@ _CODEX_HOOKS_JSON = {
         ],
     }
 }
-_CODEX_EXEC_ROOT = os.environ.get("VTUBER_CODEX_EXEC_ROOT", "~/ai")
+_CODEX_EXEC_ROOT = _user_path(os.environ.get("VTUBER_CODEX_EXEC_ROOT") or _AI_HOME)
 _CODEX_SANDBOX = os.environ.get("VTUBER_CODEX_SANDBOX", "danger-full-access")
-_CLAUDE_MCP_CONFIG = os.path.join(
-    os.environ.get("MIZUKI_REAL_HOME") or pwd.getpwuid(os.getuid()).pw_dir, ".claude", ".mcp.json"
-)
+_CLAUDE_MCP_CONFIG = os.path.join(_user_path("~"), ".claude", ".mcp.json")
 
 
 def _requested_mcp_servers(messages: List[Message]) -> tuple[str, ...]:
@@ -182,7 +192,7 @@ def _mcp_config_sections(servers: tuple[str, ...]) -> str:
 
 
 def _codex_user_environment() -> dict[str, str]:
-    real_home = os.environ.get("MIZUKI_REAL_HOME") or pwd.getpwuid(os.getuid()).pw_dir
+    real_home = _user_path("~")
     environment = {"HOME": real_home}
     try:
         shell = subprocess.run(
