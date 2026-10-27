@@ -5,6 +5,8 @@ import subprocess
 import tomllib
 from unittest.mock import patch
 
+import pytest
+
 from letta.llm_api.codex_cli_client import (
     CodexCLIClient,
     _codex_user_environment,
@@ -70,6 +72,27 @@ def test_build_request_selects_mcp_from_user_not_system_or_tools():
     config = type("Config", (), {"model": "codex-cli"})()
     request = client.build_request_data(None, messages, config, [])
     assert request["mcp_servers"] == ("slack",)
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("wiki.example.net", ("confluence",)),
+        ("https://wiki.team.example.org/pages/123", ("confluence",)),
+        ("WIKI.EXAMPLE.NET", ("confluence",)),
+        ("fakewiki.example.net", ()),
+        ("prefix.wiki.example.net", ()),
+        ("workspace.slack.com", ("slack",)),
+        ("https://other-workspace.slack.com/archives/example", ("slack",)),
+        ("https://jira.team.example.org/browse/PROJ-123", ("jira",)),
+        ("http://jira.example.net/browse/PROJ-123", ("jira",)),
+        ("jira.example.net", ()),
+        ("https://notjira.example.net/browse/PROJ-123", ()),
+        ("wiki.example.net and workspace.slack.com", ("confluence", "slack")),
+    ],
+)
+def test_mcp_selection_uses_organization_independent_service_urls(message, expected):
+    assert _requested_mcp_servers([{"role": "user", "content": message}]) == expected
 
 
 def test_temporary_codex_home_contains_only_requested_mcp(tmp_path):
