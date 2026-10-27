@@ -2040,6 +2040,30 @@ class LettaAgentV3(LettaAgentV2):
                 # Force continuation for parallel tool execution
                 aggregate_continue = True
                 aggregate_stop_reason = None
+        codex_memory_write_tools = {"core_memory_append", "core_memory_replace", "archival_memory_insert", "archival_memory_delete"}
+        if (
+            aggregate_continue
+            and self.agent_state.llm_config.model_endpoint_type == "codex_cli"
+            and not is_approval_response
+            and not tool_call_denials
+            and not tool_returns
+            and any(isinstance(part, TextContent) and part.text.strip() for part in (content or []))
+            and exec_specs
+            and all(
+                spec["name"] in codex_memory_write_tools
+                and not spec["violated"]
+                and not spec.get("error")
+                and not tool_rules_solver.has_children_tools(spec["name"])
+                and not tool_rules_solver.is_continue_tool(spec["name"])
+                for spec in exec_specs
+            )
+            and all(result.success_flag for result, _ in results)
+            and not tool_rules_solver.get_uncalled_required_tools(available_tools={tool.name for tool in self.agent_state.tools})
+        ):
+            self.logger.info("[CodexCLI] Final response memory writes succeeded; ending turn without another model call")
+            aggregate_continue = False
+            aggregate_stop_reason = LettaStopReason(stop_reason=StopReasonType.end_turn.value)
+
         return messages_to_persist, aggregate_continue, aggregate_stop_reason
 
     @trace_method
