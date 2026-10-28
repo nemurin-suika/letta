@@ -13,7 +13,10 @@ import shlex
 import shutil
 import subprocess
 import time
+import tomllib
 import uuid
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional, Tuple
 
 from letta.errors import ErrorCode, LLMBadRequestError, LLMConnectionError, LLMError, LLMServerError
@@ -270,6 +273,67 @@ def _prepare_codex_home(servers: tuple[str, ...] = ()) -> str:
     with open(os.path.join(temp_home, "hooks.json"), "w", encoding="utf-8") as f:
         json.dump(_CODEX_HOOKS_JSON, f, ensure_ascii=False, indent=2)
     return temp_home
+
+
+def _write_codex_usage(codex_home: str, model: str, usage: Optional[dict], completed: bool) -> None:
+    temporary = None
+    try:
+        with open(os.path.join(codex_home, "config.toml"), "rb") as config_file:
+            config = tomllib.load(config_file)
+        normalized = None
+        if isinstance(usage, dict):
+            counts = {name: usage.get(name, 0) for name in (
+                "input_tokens", "cached_input_tokens", "cache_write_input_tokens",
+                "output_tokens", "reasoning_output_tokens",
+            )}
+            if (
+                "input_tokens" in usage and "output_tokens" in usage
+                and all(type(value) is int and value >= 0 for value in counts.values())
+                and counts["cached_input_tokens"] + counts["cache_write_input_tokens"] <= counts["input_tokens"]
+                and counts["reasoning_output_tokens"] <= counts["output_tokens"]
+                and (
+                    "total_tokens" not in usage
+                    or (
+                        type(usage["total_tokens"]) is int
+                        and usage["total_tokens"] == counts["input_tokens"] + counts["output_tokens"]
+                    )
+                )
+            ):
+                normalized = {**counts, "total_tokens": counts["input_tokens"] + counts["output_tokens"]}
+        status = "unavailable"
+        if normalized is not None:
+            status = "complete" if completed else "partial"
+        now = datetime.now(timezone.utc)
+        request_id = uuid.uuid4().hex
+        record = {
+            "schema_version": 1,
+            "request_id": request_id,
+            "finished_at": now.isoformat(),
+            "model": model if model and model != "codex-cli" else config.get("model") or "(unknown)",
+            "model_provider": config.get("model_provider") or "(unknown)",
+            "usage_status": status,
+            "usage": normalized,
+        }
+        home = Path(_user_path(
+            os.environ.get("VTUBER_CODEX_USAGE_HOME") or os.environ.get("CODEX_HOME") or "~/.codex"
+        ))
+        directory = home / "usage"
+        for part in ("", now.strftime("%Y"), now.strftime("%m"), now.strftime("%d")):
+            directory = directory / part
+            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        destination = directory / f"{request_id}.json"
+        temporary = destination.with_suffix(".tmp")
+        with os.fdopen(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w", encoding="utf-8") as stream:
+            json.dump(record, stream)
+        os.replace(temporary, destination)
+    except Exception as error:
+        logger.warning("[CodexCLI] Usage recording failed: %s", type(error).__name__)
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _short_progress_value(value: object, limit: int = 160) -> str:
@@ -677,6 +741,8 @@ class CodexCLIClient(LLMClientBase):
         except Exception:
             pass
 
+        proc = None
+        response_data = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -715,6 +781,13 @@ class CodexCLIClient(LLMClientBase):
                 code=ErrorCode.INTERNAL_SERVER_ERROR,
             )
         finally:
+            if proc is not None:
+                _write_codex_usage(
+                    codex_home,
+                    model,
+                    response_data.get("usage") if response_data else None,
+                    completed=proc.returncode == 0,
+                )
             shutil.rmtree(codex_home, ignore_errors=True)
 
         stdout_text = response_data["stdout_text"]

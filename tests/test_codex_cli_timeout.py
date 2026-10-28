@@ -27,6 +27,7 @@ async def test_timeout_does_not_read_stdout_twice(tmp_path):
         patch("letta.llm_api.codex_cli_client.shutil.which", return_value="/usr/bin/codex"),
         patch("letta.llm_api.codex_cli_client._prepare_codex_home", return_value=str(tmp_path)),
         patch("letta.llm_api.codex_cli_client._codex_user_environment", return_value={}),
+        patch("letta.llm_api.codex_cli_client._write_codex_usage") as write_usage,
         patch("letta.llm_api.codex_cli_client.asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=process),
         patch.object(CodexCLIClient, "_communicate_streaming_codex", new_callable=AsyncMock, side_effect=asyncio.TimeoutError),
     ):
@@ -36,3 +37,4 @@ async def test_timeout_does_not_read_stdout_twice(tmp_path):
     process.kill.assert_called_once_with()
     process.wait.assert_awaited_once_with()
     process.communicate.assert_not_awaited()
+    write_usage.assert_called_once_with(str(tmp_path), request_data["model"], None, completed=False)
