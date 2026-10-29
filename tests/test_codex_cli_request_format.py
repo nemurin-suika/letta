@@ -37,3 +37,17 @@ def test_last_user_without_following_tools_has_no_continuation():
 
     assert "<continuation>" not in prompt
     assert "<current_input>\nnext\n</current_input>" in prompt
+
+
+def test_memory_instructions_keep_memory_xml_out_of_progress_messages():
+    client = CodexCLIClient()
+
+    system_prompt, _ = client._format_request([
+        {"role": "system", "content": "system instructions"},
+        {"role": "user", "content": "next"},
+    ])
+
+    assert "중간 메시지 태그 금지" in system_prompt
+    assert "도구 실행 전 설명" in system_prompt
+    assert "최종 응답 맨 끝에서만 변환됩니다" in system_prompt
+    assert "중간 메시지에 검색 태그를 출력하지 말고" in system_prompt
