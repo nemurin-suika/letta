@@ -479,6 +479,96 @@ def screenshot_dir(session_key: str = DEFAULT_SESSION_KEY) -> str:
 # claude 응답 텍스트에서 [알림: 내용] 패턴 감지
 _NOTIFY_PATTERN = re.compile(r'\[알림:\s*(.*?)\]', re.DOTALL)
 
+# ---------------------------------------------------------------------------
+# 실패 원인 분류 (TODO 15)
+#
+# claude CLI 호출이 깨지는 원인은 크게 ①로그인 토큰 만료 ②Anthropic 과부하(529)
+# ③사용량 한도 ④그 외다. 기존 코드는 전부 "claude CLI 오류"로 뭉쳐서
+# LLMServerError 를 던졌고, 백엔드는 그걸 삼켜 "작업이 완료되기 전에 중단됐습니다"
+# 한 줄만 보여줬다. 그래서 2026-10-30 12시에 로그인이 풀렸을 때도 원인을 알 수 없었다.
+# 여기서 분류한 결과를 에러 메시지 앞에 [MIZUKI_FAIL:<kind>] 마커로 심어
+# 백엔드가 사람이 읽을 문구로 바꿔 말하게 한다.
+#
+# 529 재시도 자체는 claude CLI 가 내부에서 하도록 그대로 둔다(네무린 결정).
+# letta 쪽은 재시도를 새로 붙이지 않고 상태 표시만 담당한다.
+# ---------------------------------------------------------------------------
+_FAIL_MARKER_PREFIX = "[MIZUKI_FAIL:"
+
+# 숫자 상태 코드는 세션 ID·토큰 수에 우연히 섞일 수 있어 앞에 오류 문맥을 요구한다.
+# (예: 디버그 로그 파일명 "..._50529.txt" 를 529 과부하로 오분류하면 안 된다)
+_CODE_CONTEXT = r"(?:api\s*error|http\s*error|status(?:\s*code)?|error\s*code|error)\W{0,6}"
+
+_FAIL_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "auth",
+        (
+            r"invalid api key",
+            r"please run /login",
+            r"run `?/login",
+            r"oauth token",
+            r"authentication_error",
+            r"authentication failed",
+            r"\bunauthorized\b",
+            r"not logged in",
+            r"login required",
+            r"invalid credentials",
+            r"(?:token (?:has )?expired|expired token)",
+            r"refresh token",
+            _CODE_CONTEXT + r"401\b",
+        ),
+    ),
+    (
+        "overload",
+        (
+            r"overloaded",
+            r"service unavailable",
+            _CODE_CONTEXT + r"529\b",
+            _CODE_CONTEXT + r"503\b",
+        ),
+    ),
+    (
+        "usage_limit",
+        (
+            r"usage limit",
+            r"rate_limit_error",
+            r"rate limit",
+            r"\bquota\b",
+            _CODE_CONTEXT + r"429\b",
+        ),
+    ),
+)
+
+_FAIL_REGEXES: tuple[tuple[str, tuple[re.Pattern, ...]], ...] = tuple(
+    (kind, tuple(re.compile(p, re.IGNORECASE) for p in pats)) for kind, pats in _FAIL_PATTERNS
+)
+
+# 백엔드가 그대로 읽어줄 수 있는 사람용 문구
+FAIL_KIND_MESSAGES: dict[str, str] = {
+    "auth": "클로드 로그인이 풀려서 호출이 거부됐어. 터미널에서 claude 로그인 다시 해줘.",
+    "overload": "앤트로픽 서버가 과부하라 재시도까지 다 실패했어. 조금 뒤에 다시 시켜줘.",
+    "usage_limit": "사용량 한도에 걸려서 호출이 막혔어. 한도가 풀릴 때까지 기다려야 해.",
+}
+
+
+def classify_cli_failure(text: str) -> Optional[str]:
+    """CLI 오류 본문에서 실패 종류를 추정. 못 가리면 None."""
+    if not text:
+        return None
+    for kind, regexes in _FAIL_REGEXES:
+        for rx in regexes:
+            if rx.search(text):
+                return kind
+    return None
+
+
+def append_notify_line(notify_file: str, text: str) -> None:
+    """중간 알림 JSONL 에 한 줄 추가. 실패해도 호출 흐름을 막지 않는다."""
+    try:
+        with open(notify_file, "a", encoding="utf-8") as _nf:
+            _nf.write(json.dumps({"text": text, "ts": time.time()}, ensure_ascii=False) + "\n")
+    except Exception as _we:
+        logger.debug(f"[ClaudeCLI] 알림 파일 저장 실패 (무시): {_we}")
+
 # 스크린샷/유튜브 프레임 임시 파일 보존 시간(초).
 # 한 대화 턴에서 Letta가 메모리 작업 등으로 claude -p를 여러 번 호출할 수 있기 때문에
 # 즉시 삭제하면 후속 호출에서 파일이 사라져 "이전 화면 — 내용은 이미 처리됨"으로 표시된다.
@@ -647,12 +737,35 @@ class ClaudeCLIClient(LLMClientBase):
         except Exception:
             pass
 
-        # stderr 전체를 백그라운드로 읽어 deadlock 방지
+        # stderr 전체를 백그라운드로 읽어 deadlock 방지.
+        # 라인 단위로 읽는 이유(TODO 15): claude CLI 가 529 과부하를 자기 안에서
+        # 백오프 재시도하는 동안 letta 쪽은 아무 것도 모른 채 스피너만 돌렸다.
+        # stderr 에 과부하/재시도 흔적이 흘러나오면 그 순간 중간 알림으로 띄워
+        # "죽은 건지 기다리는 건지"를 구분할 수 있게 한다. 패턴이 안 맞으면
+        # 아무 일도 하지 않으므로 기존 동작과 같다.
         stderr_chunks: list = []
+        _stderr_notified: set = set()
 
         async def _read_stderr() -> None:
-            data = await proc.stderr.read()
-            stderr_chunks.append(data.decode(errors="replace"))
+            while True:
+                try:
+                    raw = await proc.stderr.readline()
+                except Exception:
+                    break
+                if not raw:
+                    break
+                line = raw.decode(errors="replace")
+                stderr_chunks.append(line)
+                kind = classify_cli_failure(line)
+                if kind in ("overload", "usage_limit") and kind not in _stderr_notified:
+                    _stderr_notified.add(kind)
+                    label = (
+                        "앤트로픽 과부하로 재시도 중"
+                        if kind == "overload"
+                        else "사용량 한도에 걸려 대기 중"
+                    )
+                    append_notify_line(notify_file, label)
+                    logger.warning(f"[ClaudeCLI] stderr 에서 {kind} 감지: {line.strip()[:200]}")
 
         stderr_task = asyncio.create_task(_read_stderr())
 
@@ -747,7 +860,7 @@ class ClaudeCLIClient(LLMClientBase):
                 error_detail = result_data["result"]
             logger.error(f"[ClaudeCLI] 실패 (exit {proc.returncode}): {error_detail}")
             raise LLMServerError(
-                message=f"claude CLI 오류: {error_detail}",
+                message=self._failure_message(error_detail, notify_file),
                 code=ErrorCode.INTERNAL_SERVER_ERROR,
             )
 
@@ -763,7 +876,7 @@ class ClaudeCLIClient(LLMClientBase):
             error_msg = result_data.get("result") or "claude CLI에서 오류 반환"
             logger.error(f"[ClaudeCLI] is_error=true: {error_msg}")
             raise LLMServerError(
-                message=f"claude CLI 오류: {error_msg}",
+                message=self._failure_message(error_msg, notify_file),
                 code=ErrorCode.INTERNAL_SERVER_ERROR,
             )
 
@@ -772,6 +885,22 @@ class ClaudeCLIClient(LLMClientBase):
         if isinstance(result_data, dict):
             result_data["_mizuki_session_key"] = session_key
         return result_data
+
+    @staticmethod
+    def _failure_message(error_detail: str, notify_file: Optional[str] = None) -> str:
+        """오류 본문을 분류해 백엔드가 읽을 마커를 붙인다.
+
+        분류되면 "[MIZUKI_FAIL:auth] claude CLI 오류: ..." 꼴이 되고, 백엔드가
+        마커를 보고 사람이 읽을 문구로 바꿔 말한다. 못 가리면 기존 문구 그대로.
+        인증 만료는 원인이 사라지기 전에 채팅창에 한 줄 남겨 나중에도 추적되게 한다
+        (네무린 결정, 2026-10-30).
+        """
+        kind = classify_cli_failure(error_detail)
+        if not kind:
+            return f"claude CLI 오류: {error_detail}"
+        if kind == "auth" and notify_file:
+            append_notify_line(notify_file, "클로드 로그인이 풀려서 호출 실패")
+        return f"{_FAIL_MARKER_PREFIX}{kind}] claude CLI 오류: {error_detail}"
 
     @staticmethod
     def _dump_debug_log(prompt: str, stdout: str, stderr: str, returncode: Optional[int]) -> None:
