@@ -6,6 +6,9 @@
 #
 #   MIZUKI_REAL_HOME            실제 홈 (기본: 현재 HOME)
 #   MIZUKI_AI_HOME              런타임 데이터 홈 (기본: REAL_HOME)
+#   MIZUKI_SERVICE_HOME         서비스 HOME. 있으면 MIZUKI_AI_HOME 보다 우선.
+#                               _mz_setup/letta.sh 는 MIZUKI_AI_HOME 을 리포 루트(~/develop)
+#                               로 넘기므로, 집(데이터가 실제 홈)은 plist 에서 이 값을 준다.
 #   MIZUKI_LLM_CLI              claude | codex (기본: claude)
 #   MIZUKI_SECRETS_FILE         시크릿 파일 (기본: REAL_HOME/.secrets, 없으면 생략)
 #   LLM_FALLBACK_CONFIG         폴백 모델 JSON
@@ -23,7 +26,7 @@
 [ -r "$HOME/.mizuki_env" ] && . "$HOME/.mizuki_env"
 
 REAL_HOME="${MIZUKI_REAL_HOME:-$HOME}"
-AI_HOME="${MIZUKI_AI_HOME:-$REAL_HOME}"
+AI_HOME="${MIZUKI_SERVICE_HOME:-${MIZUKI_AI_HOME:-$REAL_HOME}}"
 export HOME="$AI_HOME"
 export CODEX_HOME="${CODEX_HOME:-${REAL_HOME}/.codex}"
 MIZUKI_LLM_CLI="${MIZUKI_LLM_CLI:-claude}"

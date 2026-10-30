@@ -423,6 +423,28 @@ def abort_flag_file(session_key: str = DEFAULT_SESSION_KEY) -> str:
     return f"/tmp/mizuki_abort_{key}.flag"
 
 
+def guest_flag_file(session_key: str = DEFAULT_SESSION_KEY) -> str:
+    """손님 세션 표시 파일 경로 (TODO2 1-10).
+
+    백엔드(Open-LLM-VTuber)가 턴마다 쓴다. 이 파일이 있으면 지금 말을 걸고 있는
+    상대가 네무린이 아니라 손님이라는 뜻이고, 코어 기억 쓰기를 막아야 한다.
+    """
+    key = sanitize_session_key(session_key)
+    if key == DEFAULT_SESSION_KEY:
+        return "/tmp/mizuki_guest.flag"
+    return f"/tmp/mizuki_guest_{key}.flag"
+
+
+def guest_info(session_key: Optional[str]) -> dict:
+    """손님 세션이면 {"email":..., "name":...}, 주인 세션이면 빈 dict."""
+    try:
+        with open(guest_flag_file(session_key or ""), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) and data.get("email") else {}
+    except Exception:
+        return {}
+
+
 def intent_file(session_key: str = DEFAULT_SESSION_KEY) -> str:
     """세션별 툴 승인 의도 파일 경로.
 
@@ -433,6 +455,19 @@ def intent_file(session_key: str = DEFAULT_SESSION_KEY) -> str:
     if key == DEFAULT_SESSION_KEY:
         return INTENT_FILE
     return f"/tmp/mizuki_last_reasoning_{key}.json"
+
+
+def screenshot_dir(session_key: str = DEFAULT_SESSION_KEY) -> str:
+    """세션별 스크린샷 작업 디렉터리 경로.
+
+    미즈키가 adb 등으로 찍은 화면 캡처를 여기에 저장하면, 백엔드의
+    스크린샷 polling 이 "자기 세션 디렉터리"만 감시해 그 세션 화면에만
+    올린다. /tmp 루트에 바로 저장하던 기존 방식은 모든 세션의 polling 이
+    같은 폴더를 보기 때문에 A 세션 캡처가 B 세션 화면에도 함께 떴다.
+    백엔드(letta_agent.py)가 같은 규칙으로 경로를 계산한다.
+    """
+    key = sanitize_session_key(session_key)
+    return f"/tmp/mizuki_shots/{key}"
 
 
 # claude 응답 텍스트에서 [알림: 내용] 패턴 감지
@@ -532,8 +567,14 @@ class ClaudeCLIClient(LLMClientBase):
         except Exception:
             pass
 
-        # 스크린샷 파일이 있으면 Read 툴도 허용
-        allowed_tools = "WebFetch,Read(/tmp/claude_screenshot*),Read(/tmp/claude_yt_frame*)" if screenshot_files else "WebFetch"
+        # 스크린샷 파일이 있으면 Read 툴도 허용.
+        # 웹 검색(WebFetch·WebSearch)은 손님 세션에서도 허용되는 유일한 도구다(TODO2 1-10).
+        _web_tools = "WebFetch,WebSearch"
+        allowed_tools = (
+            f"{_web_tools},Read(/tmp/claude_screenshot*),Read(/tmp/claude_yt_frame*)"
+            if screenshot_files
+            else _web_tools
+        )
         cmd = [
             "claude", "-p", user_content,
             "--system-prompt", system_prompt,
@@ -561,10 +602,18 @@ class ClaudeCLIClient(LLMClientBase):
         # 승인 payload 에 실어 백엔드로 보내고, 백엔드가 세션 이름으로 바꿔 팝업에 표시한다.
         # MIZUKI_INTENT_FILE: 승인 팝업에 표시할 {의도} 한 줄도 세션별 파일에서만
         # 읽게 한다. 단일 파일이면 동시 실행 중인 다른 세션의 의도가 섞여 뜬다.
+        # MIZUKI_SHOT_DIR: 캡처 저장 위치도 세션별로 쪼갠다. 스킬들이 이 env 를
+        # 받아 여기에 저장하면 백엔드 polling 이 자기 세션 것만 집어서 올린다.
+        _shot_dir = screenshot_dir(session_key)
+        try:
+            os.makedirs(_shot_dir, exist_ok=True)
+        except Exception as _mk_err:
+            logger.debug(f"[ClaudeCLI] 스크린샷 디렉터리 생성 실패(무시): {_mk_err}")
         child_env = {
             **os.environ,
             "MIZUKI_SESSION_KEY": session_key,
             "MIZUKI_INTENT_FILE": intent_file(session_key),
+            "MIZUKI_SHOT_DIR": _shot_dir,
         }
 
         try:
@@ -712,6 +761,10 @@ class ClaudeCLIClient(LLMClientBase):
                 code=ErrorCode.INTERNAL_SERVER_ERROR,
             )
 
+        # 응답 변환 단계에서 손님 세션 여부를 판단할 수 있게 세션 키를 실어 보낸다.
+        # (동시에 여러 세션이 돌기 때문에 인스턴스 필드로 들고 있으면 섞인다.)
+        if isinstance(result_data, dict):
+            result_data["_mizuki_session_key"] = session_key
         return result_data
 
     @staticmethod
@@ -764,7 +817,10 @@ class ClaudeCLIClient(LLMClientBase):
         completion_tokens = int(usage_raw.get("output_tokens", 0))
 
         # 응답에서 core memory 태그 파싱 및 제거
-        clean_text, tool_calls = self._extract_memory_ops(text)
+        _session_key = ""
+        if isinstance(response_data, dict):
+            _session_key = str(response_data.get("_mizuki_session_key") or "")
+        clean_text, tool_calls = self._extract_memory_ops(text, _session_key)
 
         finish_reason = "tool_calls" if tool_calls else "stop"
 
@@ -792,15 +848,33 @@ class ClaudeCLIClient(LLMClientBase):
         )
 
     @staticmethod
-    def _extract_memory_ops(text: str) -> Tuple[str, List[ToolCall]]:
-        """응답 텍스트에서 letta_memory / letta_archival 태그를 추출하고 ToolCall 목록으로 변환."""
+    def _extract_memory_ops(
+        text: str, session_key: Optional[str] = None
+    ) -> Tuple[str, List[ToolCall]]:
+        """응답 텍스트에서 letta_memory / letta_archival 태그를 추출하고 ToolCall 목록으로 변환.
+
+        손님 세션(TODO2 1-10)에서는 코어 기억(human·persona) 쓰기와 보관소 삭제를
+        만들지 않고 버린다. 프롬프트 지시만으로는 보장이 안 되므로 여기서 막는다.
+        보관소 저장은 허용하되 누구와의 대화였는지 태그를 자동으로 붙인다.
+        보관소 검색은 네무린 결정(2026-10-29)에 따라 손님 턴에도 그대로 허용한다.
+        """
         tool_calls: List[ToolCall] = []
+        _guest = guest_info(session_key)
+        _guest_email = str(_guest.get("email") or "")
+        _guest_tags: List[str] = []
+        if _guest_email:
+            _guest_tags = ["guest", f"guest:{_guest_email.split('@')[0]}"]
 
         def _make_id() -> str:
             return f"call_{uuid.uuid4().hex[:24]}"
 
         # core_memory_append 태그 처리
         for match in _APPEND_RE.finditer(text):
+            if _guest_email:
+                logger.warning(
+                    f"[ClaudeCLI] 손님 세션 코어 기억 추가 차단 (guest={_guest_email})"
+                )
+                break
             label = match.group(1).strip()
             content = match.group(2).strip()
             tool_calls.append(
@@ -816,6 +890,11 @@ class ClaudeCLIClient(LLMClientBase):
 
         # core_memory_replace 태그 처리
         for match in _REPLACE_RE.finditer(text):
+            if _guest_email:
+                logger.warning(
+                    f"[ClaudeCLI] 손님 세션 코어 기억 수정 차단 (guest={_guest_email})"
+                )
+                break
             label = match.group(1).strip()
             old_content = match.group(2).strip()
             new_content = match.group(3).strip()
@@ -839,6 +918,9 @@ class ClaudeCLIClient(LLMClientBase):
             content = match.group(2).strip()
             tags_str = attrs.get("tags", "")
             tags = [t.strip() for t in tags_str.split(",") if t.strip()] if tags_str else None
+            if _guest_tags:
+                # 손님과의 대화 기록은 반드시 손님 표시를 달아 네무린 기억과 구분한다.
+                tags = list(dict.fromkeys((tags or []) + _guest_tags))
             args: dict = {"content": content}
             if tags:
                 args["tags"] = tags
@@ -883,6 +965,11 @@ class ClaudeCLIClient(LLMClientBase):
         # 명백한 플레이스홀더(요약·예시 인용)는 건너뜀 — 진짜 UUID 형식만 허용.
         _passage_uuid_re = re.compile(r"^passage-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
         for match in _ARCHIVAL_DELETE_RE.finditer(text):
+            if _guest_email:
+                logger.warning(
+                    f"[ClaudeCLI] 손님 세션 보관소 삭제 차단 (guest={_guest_email})"
+                )
+                break
             passage_id = (match.group(1) or match.group(2) or "").strip()
             if not passage_id:
                 continue
@@ -902,17 +989,16 @@ class ClaudeCLIClient(LLMClientBase):
                 )
             )
 
+        # 태그 제거는 tool_calls 생성 여부와 무관하게 항상 한다. 손님 세션처럼
+        # 태그를 버린 경우에도 원문이 남아 자막·음성으로 새어 나가면 안 된다.
+        clean = _APPEND_RE.sub("", text)
+        clean = _REPLACE_RE.sub("", clean)
+        clean = _ARCHIVAL_INSERT_RE.sub("", clean)
+        clean = _ARCHIVAL_SEARCH_RE.sub("", clean)
+        clean = _ARCHIVAL_DELETE_RE.sub("", clean)
+        clean = clean.rstrip()
         if tool_calls:
-            # 태그 전체를 응답 텍스트에서 제거
-            clean = _APPEND_RE.sub("", text)
-            clean = _REPLACE_RE.sub("", clean)
-            clean = _ARCHIVAL_INSERT_RE.sub("", clean)
-            clean = _ARCHIVAL_SEARCH_RE.sub("", clean)
-            clean = _ARCHIVAL_DELETE_RE.sub("", clean)
-            clean = clean.rstrip()
             logger.info(f"[ClaudeCLI] 메모리 작업 {len(tool_calls)}개 파싱: {[tc.function.name for tc in tool_calls]}")
-        else:
-            clean = text
 
         return clean, tool_calls
 
