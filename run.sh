@@ -71,6 +71,9 @@ export VTUBER_CLAUDE_HOOK_SETTINGS="${VTUBER_CLAUDE_HOOK_SETTINGS:-${REAL_HOME}/
 # 승인 서버 주소 — 집 백엔드는 conf.yaml host(192.168.0.5)에만 바인드되므로
 # 127.0.0.1 로는 연결되지 않는다. 백엔드 host 를 바꾸면 이 값도 같이 맞춘다.
 export VTUBER_APPROVAL_URL="${VTUBER_APPROVAL_URL:-http://192.168.0.5:12393/tool-approval}"
+# 손님 컴퓨터 원격 개발(TODO 31) MCP 서버. 파일이 없으면 claude_cli_client 가
+# 그냥 건너뛰므로, 이 기능을 안 쓰는 환경에서도 그대로 둬도 된다.
+export MZDEV_MCP_CONFIG="${MZDEV_MCP_CONFIG:-${REAL_HOME}/develop/mizuki-devrelay/mcp-config.json}"
 
 
 # ── 실행 모드 파싱 ────────────────────────────────────────────────────────────

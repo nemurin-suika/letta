@@ -688,6 +688,14 @@ class ClaudeCLIClient(LLMClientBase):
         if hook_settings and os.path.exists(hook_settings):
             cmd.extend(["--settings", hook_settings])
 
+        # 손님 컴퓨터 원격 개발(TODO 31). env 가 가리키는 mcp-config 가 있으면
+        # mizukidev MCP 서버를 붙인다. 이 서버의 도구(mcp__mizukidev__mz_*)는
+        # 맥미니가 아니라 손님 PC 에서만 실행되고 승인도 손님 화면에서 받는다.
+        # env 미설정 시 기존 동작 그대로(다른 letta 사용에 영향 없음).
+        mcp_config = os.environ.get("MZDEV_MCP_CONFIG")
+        if mcp_config and os.path.exists(mcp_config):
+            cmd.extend(["--mcp-config", mcp_config])
+
         logger.info(
             f"[ClaudeCLI] 실행: claude -p <user({len(user_content)}chars)> "
             f"--system-prompt <sys({len(system_prompt)}chars)> "
